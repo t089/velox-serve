@@ -1,0 +1,35 @@
+{
+    "configurations": [
+    
+        {
+            "type": "lldb",
+            "request": "launch",
+            "sourceLanguages": [
+                "swift"
+            ],
+            "name": "Debug Example",
+            "program": "${workspaceFolder:velox-serve}/.build/debug/Example",
+            "args": [
+                "--listen",
+                "localhost:1337"
+            ],
+            "cwd": "${workspaceFolder:velox-serve}",
+            "preLaunchTask": "swift: Build Debug Example"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "sourceLanguages": [
+                "swift"
+            ],
+            "name": "Release Example",
+            "program": "${workspaceFolder:velox-serve}/.build/release/Example",
+            "args": [
+                "--listen",
+                "localhost:1337"
+            ],
+            "cwd": "${workspaceFolder:velox-serve}",
+            "preLaunchTask": "swift: Build Release Example"
+        }
+    ]
+}
