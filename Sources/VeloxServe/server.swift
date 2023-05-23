@@ -5,7 +5,7 @@ import NIOExtras
 import NIOHTTP1
 import NIOPosix
 
-public final class Server {
+public final class Server: Sendable {
     let serverChannel: Channel
     let quiescingHelper: ServerQuiescingHelper
     public let eventLoopGroup: EventLoopGroup
