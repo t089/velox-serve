@@ -2,6 +2,7 @@ import ArgumentParser
 import Logging
 import NIO
 import VeloxServe
+import Dispatch
 
 @main
 struct Example: AsyncParsableCommand {
@@ -48,12 +49,12 @@ struct Example: AsyncParsableCommand {
             try await res.writeHead()
         }
         res.head.status = .ok
-        let start = ContinuousClock().now
+        let start = DispatchTime.now()
         var uploadedBytes = 0
         for try await buffer in req.body {
             uploadedBytes += buffer.readableBytes
         }
-        let elapsed = .now - start
+        let elapsed = start.distance(to: .now())
         try await res.plainText("You uploaded \(uploadedBytes) bytes (\(Double(uploadedBytes)/elapsed.seconds/1024.0/1024.0) MB/s)")
     }
 
@@ -61,7 +62,7 @@ struct Example: AsyncParsableCommand {
         res.head.headers.replaceOrAdd(name: "Content-Type", value: "text/plain")
         for i in 1...10 {
             try await res << "Chunk \(i)\n"
-            try await Task.sleep(for: .seconds(0.5))
+            try await Task.sleep(nanoseconds: 0_500_000_000)
         }
         try await res << "End\n" 
     }
@@ -100,9 +101,17 @@ struct Example: AsyncParsableCommand {
     }
 }
 
-extension Duration {
+extension DispatchTimeInterval {
     var seconds: Double {
-        return Double(components.seconds) + Double(components.attoseconds) / 1e18
+        switch self {
+            case .seconds(let s):      return Double(s)
+            case .milliseconds(let s): return Double(s)/1_000.0
+            case .microseconds(let s): return Double(s)/1_000_000.0
+            case .nanoseconds(let s):  return Double(s)/1_000_000_000.0
+            case .never: return Double.greatestFiniteMagnitude
+            @unknown default:
+                return 0.0
+        }
     }
 }
 
@@ -124,14 +133,14 @@ func loggingServe(
     _ logger: Logger, serve: @escaping (RequestReader, inout ResponseWriter) async throws -> Void
 ) -> (RequestReader, inout ResponseWriter) async throws -> Void {
     { req, res in
-        let start = ContinuousClock().now
+        let start = DispatchTime.now()
         do {
             try await serve(req, &res)
-            let duration = .now - start
+            let duration = start.distance(to: .now())
             logger.info(
                 "\(req.head.method) \(req.head.uri) - \(res.head.status.code) - \(duration)")
         } catch {
-            let duration = .now - start
+            let duration = start.distance(to: .now())
             logger.error("\(req.head.method) \(req.head.uri) - ERROR - \(duration): \(error)")
             throw error
         }
