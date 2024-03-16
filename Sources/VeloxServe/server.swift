@@ -237,19 +237,17 @@ final class HTTPHandler: ChannelInboundHandler, ChannelOutboundHandler, @uncheck
                 backPressureStrategy:
                     NIOAsyncSequenceProducerBackPressureStrategies.HighLowWatermark(
                         lowWatermark: 512, highWatermark: 4096),
+                finishOnDeinit: false,
                 delegate: HTTPHandlerProducerDelegate(handler: self))
 
             let newWriter = NIOAsyncWriter.makeWriter(
                 elementType: ResponsePart.self, isWritable: context.channel.isWritable,
+                finishOnDeinit: false,
                 delegate: HTTPHandlerWriterSinkDelegate(handler: self))
 
             let trailersPromise = context.eventLoop.makePromise(of: HTTPHeaders?.self)
 
-            let out = ResponseWriter(
-                allocator: context.channel.allocator,
-                isKeepAlive: head.isKeepAlive,
-                responsePartWriter: newWriter.writer,
-                head: httpResponseHead(request: head, status: .ok))
+            
             let `in` = RequestReader(
                 logger: self.logger,
                 head: head,
@@ -260,8 +258,14 @@ final class HTTPHandler: ChannelInboundHandler, ChannelOutboundHandler, @uncheck
                     onFirstRead: { self.eventLoop.execute { self.onFirstRequestRead() } }),
                 _trailers: trailersPromise.futureResult)
 
+            let allocator = context.channel.allocator
+
             let responseTask = Task {
-                var out = out
+                var out = ResponseWriter(
+                    allocator: allocator,
+                    isKeepAlive: head.isKeepAlive,
+                    responsePartWriter: newWriter.writer,
+                    head: httpResponseHead(request: head, status: .ok))
                 do {
                     try await self.handler(`in`, &out)
                 } catch {
@@ -741,7 +745,10 @@ enum ResponsePart {
     case end(HTTPHeaders?)
 }
 
-public struct ResponseWriter {
+
+public struct ResponseWriter : ~Copyable {
+
+
     let isKeepAlive: Bool
 
     @usableFromInline
@@ -862,5 +869,6 @@ public struct ResponseWriter {
         try await self.writeBodyPart(data)
     }
 }
+
 
 public let NoopLogger = Logger(label: "noop", factory: SwiftLogNoOpLogHandler.init)

@@ -152,3 +152,8 @@ func <<(lhs: inout ResponseWriter, rhs: String) async throws {
     try await lhs.writeBodyPart(rhs)
     try await lhs.flush()
 }
+
+func <<(lhs: inout ResponseWriter, rhs: any CustomStringConvertible) async throws {
+    try await lhs.writeBodyPart("\(rhs)")
+    try await lhs.flush()
+}
