@@ -25,7 +25,7 @@ public final class Server: Sendable {
         port: Int = 0,
         group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
         logger: Logger = NoopLogger,
-        handler: @escaping (RequestReader, inout ResponseWriter) async throws -> Void
+        handler: @escaping @Sendable (RequestReader, inout ResponseWriter) async throws -> Void
     ) async throws -> Server {
 
         let quiescingHelper = ServerQuiescingHelper(group: group)
@@ -259,15 +259,18 @@ final class HTTPHandler: ChannelInboundHandler, ChannelOutboundHandler, @uncheck
                 _trailers: trailersPromise.futureResult)
 
             let allocator = context.channel.allocator
+            
+            let transferWriter = UnsafeTransfer(newWriter.writer)
+            let transferIn = UnsafeTransfer(`in`)
 
             let responseTask = Task {
                 var out = ResponseWriter(
                     allocator: allocator,
                     isKeepAlive: head.isKeepAlive,
-                    responsePartWriter: newWriter.writer,
+                    responsePartWriter: transferWriter.wrappedValue,
                     head: httpResponseHead(request: head, status: .ok))
                 do {
-                    try await self.handler(`in`, &out)
+                    try await self.handler(transferIn.wrappedValue, &out)
                 } catch {
                     self.logger.error("Unhandled error serving request: \(error)")
                     out.head = httpResponseHead(request: head, status: .internalServerError)
@@ -739,7 +742,7 @@ public struct RequestReader {
 }
 
 @usableFromInline
-enum ResponsePart {
+enum ResponsePart: Sendable {
     case head(HTTPResponseHead)
     case bodyPart(ByteBuffer)
     case end(HTTPHeaders?)
@@ -872,3 +875,20 @@ public struct ResponseWriter : ~Copyable {
 
 
 public let NoopLogger = Logger(label: "noop", factory: SwiftLogNoOpLogHandler.init)
+
+
+@usableFromInline
+struct UnsafeTransfer<Wrapped> {
+    @usableFromInline
+    var wrappedValue: Wrapped
+    
+    @inlinable
+    init(_ wrappedValue: Wrapped) {
+        self.wrappedValue = wrappedValue
+    }
+}
+
+extension UnsafeTransfer: @unchecked Sendable {}
+
+extension UnsafeTransfer: Equatable where Wrapped: Equatable {}
+extension UnsafeTransfer: Hashable where Wrapped: Hashable {}

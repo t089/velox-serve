@@ -29,7 +29,7 @@ struct Example: AsyncParsableCommand {
         try await server.run()
     }
 
-    func serve(req: RequestReader, res: inout ResponseWriter) async throws {
+    @Sendable func serve(req: RequestReader, res: inout ResponseWriter) async throws {
         switch req.head.uri {
             case "/": try await res.plainText("Hello, world!\r\n")
             case "/upload": try await upload(req: req, res: &res)
@@ -113,6 +113,18 @@ extension DispatchTimeInterval {
                 return 0.0
         }
     }
+    
+    var millis: Double {
+        switch self {
+        case .seconds(let s):      return Double(s) * 1000.0
+            case .milliseconds(let s): return Double(s)
+            case .microseconds(let s): return Double(s)/1_000.0
+            case .nanoseconds(let s):  return Double(s)/1_000_000.0
+            case .never: return Double.greatestFiniteMagnitude
+            @unknown default:
+                return 0.0
+        }
+    }
 }
 
 let randomStaticBuffer : UnsafeMutableBufferPointer<UInt8> = {
@@ -129,21 +141,29 @@ let randomStaticBuffer : UnsafeMutableBufferPointer<UInt8> = {
     return buffer
 }()
 
-func loggingServe(
+@Sendable func loggingServe(
     _ logger: Logger, serve: @escaping (RequestReader, inout ResponseWriter) async throws -> Void
-) -> (RequestReader, inout ResponseWriter) async throws -> Void {
+) -> @Sendable (RequestReader, inout ResponseWriter) async throws -> Void {
     { req, res in
         let start = DispatchTime.now()
         do {
             try await serve(req, &res)
             let duration = start.distance(to: .now())
             logger.info(
-                "\(req.head.method) \(req.head.uri) - \(res.head.status.code) - \(duration)")
+                "\(req.head.method) \(req.head.uri) - \(res.head.status.code) - \(duration.millis.formatted(3))ms")
         } catch {
             let duration = start.distance(to: .now())
             logger.error("\(req.head.method) \(req.head.uri) - ERROR - \(duration): \(error)")
             throw error
         }
+    }
+}
+
+extension Double {
+    func formatted(_ decimalPlaces: Int) -> String {
+        let factor = pow(10, Double(decimalPlaces))
+        let rounded = (self * factor).rounded()
+        return "\(rounded/factor)"
     }
 }
 

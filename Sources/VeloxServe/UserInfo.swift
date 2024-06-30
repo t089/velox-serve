@@ -33,7 +33,7 @@ public struct UserInfo: CustomStringConvertible {
   }
 
   /// A `UserInfoKey` wrapper.
-  private struct AnyUserInfoKey: Hashable, CustomStringConvertible {
+    private struct AnyUserInfoKey: Hashable, CustomStringConvertible {
     private let keyType: Any.Type
 
     var description: String {
