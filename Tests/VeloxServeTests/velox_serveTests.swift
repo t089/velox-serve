@@ -39,6 +39,61 @@ final class VeloxServeTests: XCTestCase {
         try await server.shutdown()
     }
 
+    func testMassiveParallelism() async throws {
+        actor Counter {
+            var value: Int
+
+            init(initialValue: Int) { self.value = initialValue }
+
+            func increment() -> Int {
+                value = value + 1
+                return value
+            }
+        }
+
+        let counter = Counter(initialValue: 0)
+
+        let server = try await Server.start(host: "localhost") { req, res in 
+            let v = await counter.increment()
+            try await res.plainText("\(v)")
+        }
+
+        let N = 1000
+
+        let result = try await withThrowingTaskGroup(of: Int?.self, returning: [Int].self) { group in
+            
+            for _ in 0..<N {
+                group.addTask { [client] in
+                    let req = HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
+                    let response = try await client!.execute(req, deadline: .now() + .seconds(2))
+                    let body = try await response.body.collect(upTo: 1024).readableBytesView
+                    return Int(String(decoding: body, as: UTF8.self))!
+                }
+            }
+
+            group.addTask {
+                try await server.run()
+                return nil
+            }
+
+            var results = [Int]()
+            while let result = try await group.next() {
+                if let result {
+                    results.append(result)
+                    if results.count == N {
+                        break
+                    }
+                }
+            }
+            group.cancelAll()
+
+            return results
+        }
+
+        XCTAssertEqual(N, result.count)
+        XCTAssertEqual((1...N).map({$0}), result.sorted())
+    }
+
 
     func testRedirect() async throws {
         let server = try await Server.start(host: "localhost") { req, res in 
