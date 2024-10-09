@@ -13,6 +13,9 @@ let package = Package(
         .library(
             name: "VeloxServe",
             targets: ["VeloxServe"]),
+        .executable(
+            name: "Example",
+            targets: ["Example"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.52.0"),
@@ -20,7 +23,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-metrics.git", "2.0.0" ..< "3.0.0"),
         .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.0.0"),
-        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.9.0")
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.9.0"),
+        .package(url: "https://github.com/ordo-one/package-benchmark", .upToNextMajor(from: "1.4.0")),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -32,7 +36,7 @@ let package = Package(
                 "VeloxServe"
             ],
             swiftSettings: [
-                .swiftLanguageVersion(.v6)
+                .swiftLanguageMode(.v6)
             ]
         ),
         .target(
@@ -42,10 +46,10 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIOExtras", package: "swift-nio-extras")
+                .product(name: "NIOExtras", package: "swift-nio-extras"),
             ],
             swiftSettings: [
-                .swiftLanguageVersion(.v6)
+                .swiftLanguageMode(.v6)
             ]),
         .testTarget(
             name: "VeloxServeTests",
@@ -55,3 +59,19 @@ let package = Package(
                 ]),
     ]
 )
+
+// Benchmark of VeloxBenchmarks
+package.targets += [
+    .executableTarget(
+        name: "VeloxBenchmarks",
+        dependencies: [
+            .product(name: "Benchmark", package: "package-benchmark"),
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            "VeloxServe"
+        ],
+        path: "Benchmarks/VeloxBenchmarks",
+        plugins: [
+            .plugin(name: "BenchmarkPlugin", package: "package-benchmark")
+        ]
+    ),
+]

@@ -56,6 +56,8 @@ public struct UTCInstant : InstantProtocol {
         var ts: timespec = Darwin.timespec()
         #elseif canImport(Glibc)
         var ts: timespec = Glibc.timespec()
+        #elseif canImport(Musl)
+        var ts: timespec = Musl.timespec()
         #else
         #error("Unsupported")
         #endif
@@ -75,6 +77,8 @@ public struct UTCInstant : InstantProtocol {
         var ts: timespec = Darwin.timespec()
         #elseif canImport(Glibc)
         var ts: timespec = Glibc.timespec()
+        #elseif canImport(Musl)
+        var ts: timespec = Musl.timespec()
         #else
         #error("Unsupported")
         #endif
@@ -87,6 +91,8 @@ public struct UTCInstant : InstantProtocol {
         var ts: timespec = Darwin.timespec()
         #elseif canImport(Glibc)
         var ts: timespec = Glibc.timespec()
+        #elseif canImport(Musl)
+        var ts: timespec = Musl.timespec()
         #else
         #error("Unsupported")
         #endif
@@ -122,8 +128,13 @@ public func ==(lhs:UTCInstant, rhs:UTCInstant) -> Bool {
 }
 
 public func <(lhs: UTCInstant, rhs: UTCInstant) -> Bool {
-    return  lhs.timespec.tv_sec < rhs.timespec.tv_sec && 
-           lhs.timespec.tv_nsec < rhs.timespec.tv_nsec
+    if lhs.timespec.tv_sec < rhs.timespec.tv_sec {
+        return true
+    } else if lhs.timespec.tv_sec == rhs.timespec.tv_sec {
+        return lhs.timespec.tv_nsec < rhs.timespec.tv_nsec
+    } else {
+        return false
+    }
 }
 
 private let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]

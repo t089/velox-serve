@@ -145,11 +145,13 @@ final class VeloxServeTests: XCTestCase {
             try await res.plainText("\(counter.increment())")
         }
 
+        let port = server.localAddress.port!
+
         let responses : [Int] = try await withThrowingTaskGroup(of: Int?.self) { group in 
             for _ in 0..<N {
-                group.addTask {
-                    let req = HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
-                    let response = try await self.client.execute(req, deadline: .now() + .seconds(2))
+                group.addTask { [client] in
+                    let req = HTTPClientRequest(url: "http://localhost:\(port)/")
+                    let response = try await client!.execute(req, deadline: .now() + .seconds(2))
                     let body = try await response.body.collect(upTo: 1024).readableBytesView
                     return Int(String(decoding: body, as: UTF8.self))
                 }

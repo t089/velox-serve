@@ -1,6 +1,5 @@
 {
     "configurations": [
-    
         {
             "type": "lldb",
             "request": "launch",
@@ -30,6 +29,24 @@
             ],
             "cwd": "${workspaceFolder:velox-serve}",
             "preLaunchTask": "swift: Build Release Example"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:velox-serve}",
+            "name": "Debug VeloxBenchmarks",
+            "program": "${workspaceFolder:velox-serve}/.build/debug/VeloxBenchmarks",
+            "preLaunchTask": "swift: Build Debug VeloxBenchmarks"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:velox-serve}",
+            "name": "Release VeloxBenchmarks",
+            "program": "${workspaceFolder:velox-serve}/.build/release/VeloxBenchmarks",
+            "preLaunchTask": "swift: Build Release VeloxBenchmarks"
         }
     ]
 }

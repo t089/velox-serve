@@ -25,7 +25,23 @@ public final class Server: Sendable {
         port: Int = 0,
         group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
         logger: Logger = NoopLogger,
-        handler: @escaping @Sendable (RequestReader, inout ResponseWriter) async throws -> Void
+        handler: @escaping AnyHandler.Handler
+    ) async throws -> Server {
+        try await Self.start(
+            host: host,
+            port: port,
+            group: group,
+            logger: logger,
+            handler: AnyHandler(handler)
+        )
+    }
+
+    public static func start(
+        host: String,
+        port: Int = 0,
+        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+        logger: Logger = NoopLogger,
+        handler: Handler
     ) async throws -> Server {
 
         let quiescingHelper = ServerQuiescingHelper(group: group)
@@ -191,12 +207,12 @@ final class HTTPHandler: ChannelInboundHandler, ChannelOutboundHandler, @uncheck
     }
 
     var logger: Logger
-    let handler: (RequestReader, inout ResponseWriter) async throws -> Void
+    let handler: Handler
 
     init(
         eventLoop: EventLoop,
         logger: Logger,
-        handler: @escaping (RequestReader, inout ResponseWriter) async throws -> Void
+        handler: Handler
     ) {
         self.eventLoop = eventLoop
         self.logger = logger
@@ -264,13 +280,13 @@ final class HTTPHandler: ChannelInboundHandler, ChannelOutboundHandler, @uncheck
             let transferIn = UnsafeTransfer(`in`)
 
             let responseTask = Task {
-                var out = ResponseWriter(
+                let out : any ResponseWriter = RootResponseWriter(
                     allocator: allocator,
                     isKeepAlive: head.isKeepAlive,
                     responsePartWriter: transferWriter.wrappedValue,
                     head: httpResponseHead(request: head, status: .ok))
                 do {
-                    try await self.handler(transferIn.wrappedValue, &out)
+                    try await self.handler.handle(transferIn.wrappedValue, out)
                 } catch {
                     self.logger.error("Unhandled error serving request: \(error)")
                     out.head = httpResponseHead(request: head, status: .internalServerError)
@@ -594,7 +610,26 @@ extension HTTPHandler /* : SinkDelegate */ {
 
         switch self.state {
 
-        case let .executing(context: context, request: requestState, response: _):
+        case let .executing(context: context, request: requestState, response: responseState):
+            // not sure about this one, but we drop the sink and make sure to close it before
+            
+            switch responseState {
+            case .headWritten(task: _, sink: let sink):
+                if let error {
+                    sink.finish(error: error)
+                } else {
+                    sink.finish()
+                }
+            case .waitingForHead(expects100Continue: _, task: _, sink: let sink):
+                if let error {
+                    sink.finish(error: error)
+                } else {
+                    sink.finish()
+                }
+            default: break
+                // noop
+            }
+            
             if let error {
                 self.logger.debug("Response writer terminated with error: \(error)")
                 context.close(mode: .output, promise: nil)
@@ -748,16 +783,17 @@ enum ResponsePart: Sendable {
     case end(HTTPHeaders?)
 }
 
+public protocol ResponseWriter: AnyObject {
 
-public struct ResponseWriter : ~Copyable {
+    var head: HTTPResponseHead { get set }
+    var trailers: HTTPHeaders? { get set }
 
+    func writeHead() async throws
+    func writeBodyPart(_ data: inout ByteBuffer) async throws
+    func end() async throws
+}
 
-    let isKeepAlive: Bool
-
-    @usableFromInline
-    let responsePartWriter: NIOAsyncWriter<ResponsePart, HTTPHandlerWriterSinkDelegate>
-
-    public var head: HTTPResponseHead
+extension ResponseWriter {
     public var status: HTTPResponseStatus {
         get {
             self.head.status
@@ -766,7 +802,48 @@ public struct ResponseWriter : ~Copyable {
             self.head.status = newValue
         }
     }
-    public var headers: HTTPHeaders {
+}
+
+extension ResponseWriter {
+    public func writeBodyPart(_ string: String) async throws {
+        try await self.writeBodyPart(string.utf8)
+    }
+
+    public func writeBodyPart(_ string: Substring) async throws {
+        try await self.writeBodyPart(string.utf8)
+    }
+
+    public func writeBodyPart(_ bytes: some Sequence<UInt8>) async throws {
+        var buffer = ByteBuffer(bytes: bytes)
+        try await self.writeBodyPart(&buffer)
+    }
+
+    public func plainText(_ text: String) async throws {
+        self.head.headers.replaceOrAdd(name: "Content-Type", value: "text/plain")
+        let data = text.utf8
+        self.head.headers.replaceOrAdd(name: "Content-Length", value: "\(data.count)")
+        try await self.writeBodyPart(data)
+    }
+}
+
+
+internal class RootResponseWriter : ResponseWriter {
+
+
+    let isKeepAlive: Bool
+
+    let responsePartWriter: NIOAsyncWriter<ResponsePart, HTTPHandlerWriterSinkDelegate>
+
+    var head: HTTPResponseHead
+    var status: HTTPResponseStatus {
+        get {
+            self.head.status
+        }
+        set {
+            self.head.status = newValue
+        }
+    }
+    var headers: HTTPHeaders {
         get {
             self.head.headers
         }
@@ -775,7 +852,7 @@ public struct ResponseWriter : ~Copyable {
         }
     }
 
-    public var trailers: HTTPHeaders?
+    var trailers: HTTPHeaders?
 
     init(
         allocator: ByteBufferAllocator,
@@ -792,10 +869,10 @@ public struct ResponseWriter : ~Copyable {
     private(set) var headerWritten: Bool = false
     private(set) var isDone: Bool = false
 
-    @usableFromInline
+    private
     var writeBuffer: ByteBuffer
 
-    public mutating func writeHead() async throws {
+    func writeHead() async throws {
         precondition(self.headerWritten == false, "Header can only be written once.")
         try await self.responsePartWriter.yield(.head(self.head))
         if self.head.status.code / 100 != 1 {
@@ -803,8 +880,7 @@ public struct ResponseWriter : ~Copyable {
         }
     }
 
-    @usableFromInline
-    internal mutating func writeHeadIfNecessary() async throws {
+    private func writeHeadIfNecessary() async throws {
         guard self.headerWritten == false else {
             return
         }
@@ -812,27 +888,18 @@ public struct ResponseWriter : ~Copyable {
         try await self.writeHead()
     }
 
-    public mutating func writeBodyPart(_ string: String) async throws {
-        try await self.writeBodyPart(string.utf8)
-    }
-
-    public mutating func writeBodyPart(_ string: Substring) async throws {
-        try await self.writeBodyPart(string.utf8)
-    }
-
-    public mutating func writeBodyPart(_ data: UInt8) async throws {
+    func writeBodyPart(_ data: UInt8) async throws {
         self.writeBuffer.writeInteger(data)
         try await self.flushIfNecessary()
     }
 
-    @inlinable
-    public mutating func writeBodyPart(_ data: some Sequence<UInt8>) async throws {
+    func writeBodyPart(_ data: some Sequence<UInt8>) async throws {
         self.writeBuffer.writeBytes(data)
         try await self.flushIfNecessary()
     }
 
     @inlinable
-    public mutating func writeBodyPart(_ data: inout ByteBuffer) async throws {
+    public func writeBodyPart(_ data: inout ByteBuffer) async throws {
         if data.readableBytes > 0 {
             self.writeBuffer.writeBuffer(&data)
             try await self.flushIfNecessary()
@@ -840,7 +907,7 @@ public struct ResponseWriter : ~Copyable {
     }
 
     @inlinable
-    mutating func flushIfNecessary() async throws {
+    func flushIfNecessary() async throws {
         try await self.writeHeadIfNecessary()
         if self.writeBuffer.readableBytes >= 163840 {
             try await responsePartWriter.yield(
@@ -849,7 +916,7 @@ public struct ResponseWriter : ~Copyable {
     }
 
     @inlinable
-    public mutating func flush() async throws {
+    public func flush() async throws {
         try await self.writeHeadIfNecessary()
         if self.writeBuffer.readableBytes > 0 {
             try await responsePartWriter.yield(
@@ -857,7 +924,16 @@ public struct ResponseWriter : ~Copyable {
         }
     }
 
-    internal mutating func end() async throws {
+    public func end(_ trailers: HTTPHeaders?) async throws {
+        precondition(self.isDone == false)
+        self.isDone.toggle()
+        try await self.flush()
+        self.trailers = trailers
+        try await responsePartWriter.yield(.end(self.trailers))
+        self.responsePartWriter.finish()
+    }
+
+    public func end() async throws {
         precondition(self.isDone == false)
         self.isDone.toggle()
         try await self.flush()
@@ -865,7 +941,7 @@ public struct ResponseWriter : ~Copyable {
         self.responsePartWriter.finish()
     }
 
-    public mutating func plainText(_ text: String) async throws {
+    public func plainText(_ text: String) async throws {
         self.head.headers.replaceOrAdd(name: "Content-Type", value: "text/plain")
         let data = text.utf8
         self.head.headers.replaceOrAdd(name: "Content-Length", value: "\(data.count)")
