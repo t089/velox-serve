@@ -30,7 +30,7 @@ struct Example: AsyncParsableCommand {
     }
 
     @Sendable func serve(req: RequestReader, res: any ResponseWriter) async throws {
-        switch req.head.uri {
+        switch req.path {
             case "/": try await res.plainText("Hello, world!\r\n")
             case "/upload": try await upload(req: req, res: res)
             case "/chunked": try await chunked(req: req, res: res)
@@ -38,17 +38,17 @@ struct Example: AsyncParsableCommand {
             case "/random": try await random(req: req, res: res)
 
             default: 
-                res.head.status = .notFound
+                res.status = .notFound
                 try await res.plainText("ERROR: Not found")
         }
     }
 
     func upload(req: RequestReader, res: any ResponseWriter) async throws {
-        if req.head.headers["Expect"].contains("100-continue") {
-            res.head.status = .continue
+        if req.headers[values: .expect].contains("100-continue") {
+            res.status = .continue
             try await res.writeHead()
         }
-        res.head.status = .ok
+        res.status = .ok
         let start = DispatchTime.now()
         var uploadedBytes = 0
         for try await buffer in req.body {
@@ -59,7 +59,7 @@ struct Example: AsyncParsableCommand {
     }
 
     func chunked(req: RequestReader, res: any ResponseWriter) async throws {
-        res.head.headers.replaceOrAdd(name: "Content-Type", value: "text/plain")
+        res.headers[.contentType] = "text/plain"
         for i in 1...10 {
             try await res << "Chunk \(i)\n"
             try await Task.sleep(nanoseconds: 0_500_000_000)
@@ -68,19 +68,26 @@ struct Example: AsyncParsableCommand {
     }
 
     func echo(req: RequestReader, res: any ResponseWriter) async throws {
-        if req.head.headers["Expect"].contains("100-continue") {
-            res.head.status = .continue
-            try await res.writeHead()
-        }
-        res.head.status = .ok
+        /**/
+        res.status = .ok
         
-        if let contentType = req.head.headers.first(name: "Content-Type") {
-            res.head.headers.add(name: "Content-Type", value: contentType)
+        if let contentType = req.headers[.contentType] {
+            res.headers[.contentType] = contentType
         }
-        if let contentLength = req.head.headers.first(name: "Content-Length") {
-            res.head.headers.add(name: "Content-Length", value: contentLength)
+        if let contentLength = req.headers[.contentLength] {
+            res.headers[.contentLength] = contentLength
         }
         var count = 0
+
+        try await Task.sleep(for: .seconds(5))
+
+        if req.headers[values: .expect].contains("100-continue") {
+            res.status = .continue
+            try await res.writeHead()
+        }
+
+        res.status = .ok
+
         for try await var buffer in req.body {
             count += buffer.readableBytes
             try await res.writeBodyPart(&buffer)
@@ -93,8 +100,8 @@ struct Example: AsyncParsableCommand {
     
     func random(req: RequestReader, res: any ResponseWriter) async throws {
         
-        res.head.headers.replaceOrAdd(name: "Content-Length", value: "\(randomStaticBuffer.value.count)")
-        res.head.headers.replaceOrAdd(name: "Content-Type", value: "text/plain")
+        res.headers[.contentLength] = "\(randomStaticBuffer.value.count)"
+        res.headers[.contentType] =  "text/plain"
         
         try await res.writeBodyPart(randomStaticBuffer.value)
         
@@ -103,15 +110,7 @@ struct Example: AsyncParsableCommand {
 
 extension DispatchTimeInterval {
     var seconds: Double {
-        switch self {
-            case .seconds(let s):      return Double(s)
-            case .milliseconds(let s): return Double(s)/1_000.0
-            case .microseconds(let s): return Double(s)/1_000_000.0
-            case .nanoseconds(let s):  return Double(s)/1_000_000_000.0
-            case .never: return Double.greatestFiniteMagnitude
-            @unknown default:
-                return 0.0
-        }
+        return millis / 1000.0
     }
     
     var millis: Double {
@@ -154,10 +153,10 @@ let randomStaticBuffer : UnsafeSendableBox<UnsafeMutableBufferPointer<UInt8>> = 
             try await serve(req, res)
             let duration = start.distance(to: .now())
             logger.info(
-                "\(req.head.method) \(req.head.uri) - \(res.head.status.code) - \(duration.millis.formatted(3))ms")
+                "\(req.method) \(req.path) - \(res.status.code) - \(duration.millis.formatted(3))ms")
         } catch {
             let duration = start.distance(to: .now())
-            logger.error("\(req.head.method) \(req.head.uri) - ERROR - \(duration): \(error)")
+            logger.error("\(req.method) \(req.path) - ERROR - \(duration): \(error)")
             throw error
         }
     }

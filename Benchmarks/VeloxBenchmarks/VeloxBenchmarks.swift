@@ -13,7 +13,7 @@ let benchmarks : @Sendable () -> Benchmark? =  { @Sendable () -> Benchmark? in
     Benchmark("SomeBenchmark") {  (benchmark: Benchmark) async throws -> () in
         
         let server = try await Server.start(host: "127.0.0.1") { req, res in 
-            switch req.head.uri {
+            switch req.path {
                 case "/echo":
                     for try await var chunk in req.body {
                         try await res.writeBodyPart(&chunk)

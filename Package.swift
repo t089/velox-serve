@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "velox-serve",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
@@ -47,6 +47,8 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOExtras", package: "swift-nio-extras"),
+                .product(name: "NIOHTTPTypes", package: "swift-nio-extras"),
+                .product(name: "NIOHTTPTypesHTTP1", package: "swift-nio-extras"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6)
