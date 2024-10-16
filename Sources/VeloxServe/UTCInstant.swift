@@ -8,29 +8,29 @@
     #error("Unsupported")
 #endif
 
-public struct UTCClock: Clock {
-    public typealias Instant = UTCInstant
+struct UTCClock: Clock {
+    typealias Instant = UTCInstant
 
-    public var now: UTCInstant { .now }
+    var now: UTCInstant { .now }
 
-    public var minimumResolution: Duration { .nanoseconds(1) }
+    var minimumResolution: Duration { .nanoseconds(1) }
 
-    public func sleep(until deadline: UTCInstant, tolerance: Duration?) async throws {
+    func sleep(until deadline: UTCInstant, tolerance: Duration?) async throws {
         let timeToSleep = UTCInstant.now.duration(to: deadline)
         let nanos = UInt64(timeToSleep.components.seconds) * 1_000_000_000 + UInt64(timeToSleep.components.attoseconds) / 1_000_000_000
         try await Task.sleep(nanoseconds: nanos)
     }
 }
 
-public struct UTCInstant : InstantProtocol {
-    public typealias Duration = Swift.Duration
+struct UTCInstant : InstantProtocol {
+    typealias Duration = Swift.Duration
     var timespec: timespec
 
-    public var components: (seconds: Int, nanoseconds: Int) {
+    var components: (seconds: Int, nanoseconds: Int) {
         return (timespec.tv_sec, timespec.tv_nsec)
     }
 
-    public func advanced(by duration: Duration) -> UTCInstant {
+    func advanced(by duration: Duration) -> UTCInstant {
         let components = duration.components
         var copy = self
         let (newSeconds, overflow) = copy.components.seconds.addingReportingOverflow(Int(clamping: components.seconds))
@@ -51,7 +51,7 @@ public struct UTCInstant : InstantProtocol {
         return copy
     }
 
-    public func duration(to other: UTCInstant) -> Duration {
+    func duration(to other: UTCInstant) -> Duration {
         #if canImport(Darwin)
         var ts: timespec = Darwin.timespec()
         #elseif canImport(Glibc)
@@ -67,12 +67,12 @@ public struct UTCInstant : InstantProtocol {
         return Duration(ts)
     }
 
-    public func hash(into hasher: inout Hasher) {
+    func hash(into hasher: inout Hasher) {
         hasher.combine(self.timespec.tv_sec)
         hasher.combine(self.timespec.tv_nsec)
     }
 
-    public static var now: UTCInstant {
+    static var now: UTCInstant {
         #if canImport(Darwin)
         var ts: timespec = Darwin.timespec()
         #elseif canImport(Glibc)
@@ -86,7 +86,7 @@ public struct UTCInstant : InstantProtocol {
         return UTCInstant(timespec: ts)
     }
 
-    public static var distantFuture: UTCInstant {
+    static var distantFuture: UTCInstant {
         #if canImport(Darwin)
         var ts: timespec = Darwin.timespec()
         #elseif canImport(Glibc)
@@ -102,7 +102,7 @@ public struct UTCInstant : InstantProtocol {
         return .init(timespec: ts)
     }
 
-    public func formatted() -> String {
+    func formatted() -> String {
         var now = self.timespec.tv_sec
 
         var components = tm()
@@ -123,11 +123,11 @@ public struct UTCInstant : InstantProtocol {
     }
 }
 
-public func ==(lhs:UTCInstant, rhs:UTCInstant) -> Bool {
+func ==(lhs:UTCInstant, rhs:UTCInstant) -> Bool {
     return lhs.timespec.tv_sec == rhs.timespec.tv_sec && lhs.timespec.tv_nsec == rhs.timespec.tv_nsec
 }
 
-public func <(lhs: UTCInstant, rhs: UTCInstant) -> Bool {
+func <(lhs: UTCInstant, rhs: UTCInstant) -> Bool {
     if lhs.timespec.tv_sec < rhs.timespec.tv_sec {
         return true
     } else if lhs.timespec.tv_sec == rhs.timespec.tv_sec {

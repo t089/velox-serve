@@ -7,6 +7,7 @@ import NIOPosix
 import NIOHTTPTypes
 import NIOHTTPTypesHTTP1
 import HTTPTypes
+import ServiceLifecycle
 
 public final class Server: Sendable {
     public enum HTTPError : Error {
@@ -51,6 +52,7 @@ public final class Server: Sendable {
         )
     }
 
+    // TODO: move start into run method
     public static func start(
         host: String,
         port: Int = 0,
@@ -58,7 +60,7 @@ public final class Server: Sendable {
         logger: Logger = NoopLogger,
         handler: Handler
     ) async throws -> Server {
-
+        
         let quiescingHelper = ServerQuiescingHelper(group: group)
 
         let socketBootstrap = ServerBootstrap(group: group)
@@ -76,7 +78,7 @@ public final class Server: Sendable {
 
             // Enable SO_REUSEADDR for the accepted Channels
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 1)
+            //.childChannelOption(ChannelOptions.maxMessagesPerRead, value: 1)
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelOption(ChannelOptions.autoRead, value: true)
 
@@ -86,7 +88,9 @@ public final class Server: Sendable {
                 try channel.pipeline.syncOperations.configureHTTPServerPipeline(
                     withPipeliningAssistance: false, 
                     withServerUpgrade: nil, 
-                    withErrorHandling: true)
+                    withErrorHandling: true,
+                    withOutboundHeaderValidation: false)
+                try channel.pipeline.syncOperations.addHandler(ChannelQuiescingHandler(logger: logger))
                 try channel.pipeline.syncOperations.addHandler(AutomaticContinueHandler())
                 try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: "velox-serve"))
                 try channel.pipeline.syncOperations.addHandler(HTTP1ToHTTPServerCodec(secure: false))
@@ -110,29 +114,36 @@ public final class Server: Sendable {
     }
 
     public func run() async throws {
-        try await withTaskCancellationHandler(
-            operation: {
-                try await withThrowingDiscardingTaskGroup { group in
-                    try await serverChannel.executeThenClose { inbound in
-                        logger.info("Listening for connections on \(self.localAddress) ...")
-                        for try await channel in inbound {
-                            group.addTask {
+        //let closePromise = serverChannel.channel.eventLoop.makePromise(of: Void.self)
+        try await withGracefulShutdownHandler {
+            try await withThrowingDiscardingTaskGroup { group in
+                try await serverChannel.executeThenClose { inbound in
+                    logger.info("Listening for connections on \(self.localAddress) ...")
+                    for try await channel in inbound.cancelOnGracefulShutdown() {
+                        group.addTask { [logger] in 
+                            do { 
                                 try await self.handle(channel: channel)
+                            } catch {
+                                logger.trace("Error handling connection: \(error)")
                             }
                         }
                     }
                 }
-            },
-            onCancel: {
-                serverChannel.channel.close(promise: nil)
-            })
+                logger.info("Stopped listening for new connections.")
+            }
+            logger.info("Server shutdown complete.")
+        } onGracefulShutdown: {
+            self.quiescingHelper.initiateShutdown(promise: nil)
+        }
+        
     }
 
+    private
     func handle(channel: NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>) async throws {
         try await channel.executeThenClose { inbound, outbound in
             var inboundIterator = inbound.makeAsyncIterator()
             
-            guard let  part = try await inboundIterator.next() else { return }
+            guard let part = try await inboundIterator.next() else { return }
             guard case var .head(head) = part else {
                 throw HTTPError.unexpectedHTTPPart(part)
             }
@@ -173,10 +184,14 @@ public final class Server: Sendable {
                 if !body.wasRead {
                     // if the body was not read, we need to consume it
                     for try await _ in body {}
-                }
+                } 
 
                 if !responseWriter.isDone {
                     try await responseWriter.end()
+                }
+
+                if !head.isKeepAlive {
+                    break
                 }
                 
                 
@@ -209,10 +224,16 @@ public final class Server: Sendable {
                 try await p.futureResult.get()
             },
             onCancel: {
-                serverChannel.channel.close(promise: nil)
+                serverChannel.channel.close(promise: p)
             })
     }
+
+    public func shutdownGracefully() {
+        quiescingHelper.initiateShutdown(promise: nil)
+    }
 }
+
+extension Server : Service {}
 
 public struct ConnectionClosedError: Error {}
 
@@ -279,7 +300,7 @@ public class ReadableBody: AsyncSequence {
                     self.isFirstRead.toggle()
                 }
                 guard let next = try await underlying._internal.next() else {
-                    trailers.succeed(nil)
+                    //trailers.succeed(nil)
                     self.underlying.wasRead = true
                     return nil
                 }
@@ -327,11 +348,7 @@ extension ReadableBody {
 
 extension HTTPRequest {
     var isKeepAlive: Bool {
-        let values = self.headerFields[values: .connection].map {
-            $0.lowercased()
-        }
-
-        return values.contains("keep-alive") && !values.contains("close")
+        self.headerFields[.connection] != "close"
     }
 }
 
@@ -350,8 +367,8 @@ func httpResponse(
         // the user hasn't pre-set either 'keep-alive' or 'close', so we might need to add headers
 
         switch (request.isKeepAlive) {
-        case true:
-            response.headerFields[.connection] = "keep-alive"
+        case true: break
+            //response.headerFields[.connection] = "keep-alive"
         case false:
             response.headerFields[.connection] = "close"
         }
@@ -494,11 +511,7 @@ internal class RootResponseWriter : ResponseWriter {
         try await self.writeHead()
     }
 
-    func writeBodyPart(_ data: UInt8) async throws {
-        self.writeBuffer.writeInteger(data)
-        try await self.flushIfNecessary()
-    }
-
+     @inlinable
     func writeBodyPart(_ data: some Sequence<UInt8>) async throws {
         self.writeBuffer.writeBytes(data)
         try await self.flushIfNecessary()
@@ -515,9 +528,10 @@ internal class RootResponseWriter : ResponseWriter {
     @inlinable
     func flushIfNecessary() async throws {
         try await self.writeHeadIfNecessary()
-        if self.writeBuffer.readableBytes >= 163840 {
+        let readableBytes = self.writeBuffer.readableBytes
+        if readableBytes >= 0 {
             try await responsePartWriter.write(
-                .body(self.writeBuffer.readSlice(length: self.writeBuffer.readableBytes)!))
+                .body(self.writeBuffer.readSlice(length: readableBytes)!))
         }
     }
 
@@ -536,7 +550,6 @@ internal class RootResponseWriter : ResponseWriter {
         try await self.flush()
         self.trailers = trailers
         try await responsePartWriter.write(.end(self.trailers))
-        self.responsePartWriter.finish()
     }
 
     public func end() async throws {
@@ -544,7 +557,6 @@ internal class RootResponseWriter : ResponseWriter {
         self.isDone.toggle()
         try await self.flush()
         try await responsePartWriter.write(.end(self.trailers))
-        self.responsePartWriter.finish()
     }
 
     public func plainText(_ text: String) async throws {

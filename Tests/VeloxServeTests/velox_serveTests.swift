@@ -3,6 +3,8 @@ import VeloxServe
 import AsyncHTTPClient
 import NIO
 import HTTPTypes
+import NIOHTTPTypes
+import NIOHTTPTypesHTTP1
 
 final class VeloxServeTests: XCTestCase {
 
@@ -128,12 +130,23 @@ final class VeloxServeTests: XCTestCase {
     func testUpload() async throws {
         let size = 1024 * 1024 // 1MB
 
+        actor UploadedData {
+            var data = ByteBuffer()
+
+            func setData(_ data: ByteBuffer) {
+                self.data = data
+            }
+        }
+
+        let uploadedData = UploadedData()
+
         let server = try await Server.start(host: "localhost") { req, res in 
             XCTAssertEqual(req.method, .post)
             XCTAssertEqual(req.body.expectedContentLength, size)
             let data = try await req.body.collect(upTo: req.body.expectedContentLength ?? .max)
             
             try await res.plainText("Uploaded \(data.readableBytes) bytes")
+            await uploadedData.setData(data)
         }
 
         let serverTask = Task {
@@ -154,7 +167,8 @@ final class VeloxServeTests: XCTestCase {
         let body = try await response.body.collect(upTo: 1024).readableBytesView
         XCTAssertEqual(.ok, response.status)
         XCTAssertEqual("Uploaded \(size) bytes", String(decoding: body, as: UTF8.self))
-
+        let receivedData = await uploadedData.data
+        XCTAssertEqual(uploadData, receivedData)
     }
 
     func testUploadTooLarge() async throws {
@@ -273,11 +287,39 @@ final class VeloxServeTests: XCTestCase {
             cont.finish()
         }
         req.method = .POST
-        req.body = .stream(stream, length: .known(size))
+        req.body = .stream(stream, length: .known(Int64(size)))
         let response = try await self.client.execute(req, deadline: .now() + .seconds(2))
         let body = try await response.body.collect(upTo: 2*size).readableBytesView
 
         XCTAssertEqual(size, body.count)
         
+    }
+
+}
+
+enum HTTPError: Error {
+    case unexpectedHTTPPart(HTTPResponsePart?)
+}
+
+enum SimpleClient {
+    static func execute<Result>(host: String, port: Int, _ work: @escaping (NIOAsyncChannelInboundStream<HTTPResponsePart>, NIOAsyncChannelOutboundWriter<HTTPRequestPart>) async throws -> (Result)) async throws -> Result {
+        let channel : NIOAsyncChannel = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEPORT), value: 1)
+            .connect(host: host, port: port) { channel in
+                channel.pipeline.addHTTPClientHandlers().flatMap {
+                    channel.pipeline.addHandler(HTTP1ToHTTPClientCodec())
+                }.flatMapThrowing {
+                    try NIOAsyncChannel(
+                        wrappingChannelSynchronously: channel,
+                        configuration: .init(
+                            inboundType: HTTPResponsePart.self,
+                            outboundType: HTTPRequestPart.self)
+                        )
+                }
+
+            }
+        
+        return try await channel.executeThenClose(work)
     }
 }

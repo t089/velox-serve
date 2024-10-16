@@ -3,6 +3,7 @@ import Logging
 import NIO
 import VeloxServe
 import Dispatch
+import ServiceLifecycle
 
 @main
 struct Example: AsyncParsableCommand {
@@ -18,22 +19,31 @@ struct Example: AsyncParsableCommand {
             String(hostAndPort.removeFirst()), hostAndPort.first.flatMap { Int(String($0)) } ?? 0
         )
 
-        let elg = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
+        let elg = MultiThreadedEventLoopGroup.singleton
 
-        let logger = Logger(label: "main")
+        let logger: Logger = {
+            var logger =  Logger(label: "main")
+            logger.logLevel = .trace
+            return logger
+        }()
 
         let server = try await Server.start(
             host: host, port: port, group: elg, logger: logger,
             handler: AnyHandler(loggingServe(logger, serve: self.serve)))
-        logger.info("Server listening on: \(server.localAddress)")
-        try await server.run()
+        
+        let group = ServiceGroup(
+            services: [ server ],
+            gracefulShutdownSignals: [ .sigterm, .sigint ],
+            cancellationSignals: [ ],
+            logger: logger)
+        try await group.run()
     }
 
     @Sendable func serve(req: RequestReader, res: any ResponseWriter) async throws {
         switch req.path {
             case "/": try await res.plainText("Hello, world!\r\n")
             case "/upload": try await upload(req: req, res: res)
-            case "/chunked": try await chunked(req: req, res: res)
+            case let path where path.hasPrefix("/chunked"): try await chunked(req: req, res: res)
             case "/echo": try await echo(req: req, res: res)
             case "/random": try await random(req: req, res: res)
 
@@ -60,7 +70,10 @@ struct Example: AsyncParsableCommand {
 
     func chunked(req: RequestReader, res: any ResponseWriter) async throws {
         res.headers[.contentType] = "text/plain"
-        for i in 1...10 {
+
+        let numberOfChunks = req.path.components(separatedBy: "/").last.flatMap { Int($0) } ?? 10
+
+        for i in 1...numberOfChunks {
             try await res << "Chunk \(i)\n"
             try await Task.sleep(nanoseconds: 0_500_000_000)
         }
@@ -78,8 +91,6 @@ struct Example: AsyncParsableCommand {
             res.headers[.contentLength] = contentLength
         }
         var count = 0
-
-        try await Task.sleep(for: .seconds(5))
 
         if req.headers[values: .expect].contains("100-continue") {
             res.status = .continue
