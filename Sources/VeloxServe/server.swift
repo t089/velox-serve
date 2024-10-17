@@ -39,6 +39,7 @@ public final class Server: Sendable {
     public static func start(
         host: String,
         port: Int = 0,
+        name: String,
         group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
         logger: Logger = NoopLogger,
         handler: @escaping AnyHandler.Handler
@@ -46,6 +47,7 @@ public final class Server: Sendable {
         try await Self.start(
             host: host,
             port: port,
+            name: name,
             group: group,
             logger: logger,
             handler: AnyHandler(handler)
@@ -56,6 +58,7 @@ public final class Server: Sendable {
     public static func start(
         host: String,
         port: Int = 0,
+        name: String,
         group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
         logger: Logger = NoopLogger,
         handler: Handler
@@ -92,7 +95,7 @@ public final class Server: Sendable {
                     withOutboundHeaderValidation: false)
                 try channel.pipeline.syncOperations.addHandler(ChannelQuiescingHandler(logger: logger))
                 try channel.pipeline.syncOperations.addHandler(AutomaticContinueHandler())
-                try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: "velox-serve"))
+                try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: name))
                 try channel.pipeline.syncOperations.addHandler(HTTP1ToHTTPServerCodec(secure: false))
                 
                 return try NIOAsyncChannel(
