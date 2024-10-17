@@ -18,9 +18,24 @@ final class VeloxServeTests: XCTestCase {
         try! client.syncShutdown()
     }
 
+    // configure a server and connect with a client
+    private func withServer<T>(handler: @escaping AnyHandler.Handler, client: @escaping SimpleClient.ClientHandler<T>) async throws ->  T {
+        let server = try await Server.start(host: "localhost", handler: AnyHandler(handler))
+    
+        return try await withThrowingDiscardingTaskGroup { group in
+            group.addTask {
+                try await server.run()
+            }
+            defer {
+                group.cancelAll()
+            }
+
+            return try await SimpleClient.execute(host: "localhost", port: server.localAddress.port!, client)
+        }
+    }
 
     func testSimpleGet() async throws {
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = try await Server.start(host: "localhost", name: "velox-serve") { req, res in 
             try await res.plainText("Hello, World")
         }
 
@@ -44,21 +59,26 @@ final class VeloxServeTests: XCTestCase {
         try await server.shutdown()
     }
 
-    private func withServer<T>(handler: @escaping AnyHandler.Handler, _ body: @escaping (Server) async throws -> T) async throws ->  T {
-        let server = try await Server.start(host: "localhost", handler: AnyHandler(handler))
-    
-        return try await withThrowingDiscardingTaskGroup { group in
-            group.addTask {
-                try await server.run()
+    func testTrailers() async throws {
+        let xTest = HTTPField.Name("x-test")!
+        let result = try await withServer { req, res in 
+            // reading trailers before the body, discards the body
+            res.trailers = try await req.trailers
+            // this should not do anything
+            for try await var buffer in req.body {
+                try await res.writeBodyPart(&buffer)
             }
-            defer {
-                group.cancelAll()
-            }
+            try await res.writeBodyPart("EOF\r\n")
+        } client: { inbound, outbound in 
+            try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
+            try await outbound.write(.body(ByteBuffer(string: "Hello, World\r\n")))
+            try await outbound.write(.end([xTest: "test"]))
 
-            return try await body(server)
+            return try await inbound.readFullResponse()
         }
-        
-        
+
+        XCTAssertEqual([ xTest: "test"], result.2)
+        XCTAssertEqual("EOF\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
     }
 
     func testReadingRequestPartially() async throws {
@@ -66,17 +86,17 @@ final class VeloxServeTests: XCTestCase {
             for try await var buffer in req.body.prefix(2) {
                 try await res.writeBodyPart(&buffer)
             }
-        } _: { server in
-            try await SimpleClient.execute(host: "localhost", port: server.localAddress.port!) { inbound, outbound in
-                let parts = (1...10).map { "Part \($0)\r\n" }
-                try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
-                for part in parts {
-                    try await outbound.write(.body(ByteBuffer(string: part)))
-                }
-                try await outbound.write(.end(nil))
-
-                return try await inbound.readFullResponse()
+        } client: { inbound, outbound in
+        
+            let parts = (1...10).map { "Part \($0)\r\n" }
+            try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
+            for part in parts {
+                try await outbound.write(.body(ByteBuffer(string: part)))
             }
+            try await outbound.write(.end(nil))
+
+            return try await inbound.readFullResponse()
+        
         }
 
         XCTAssertEqual(.ok, result.0.status)
@@ -341,7 +361,9 @@ enum HTTPError: Error {
 }
 
 enum SimpleClient {
-    static func execute<Result>(host: String, port: Int, _ work: @escaping (NIOAsyncChannelInboundStream<HTTPResponsePart>, NIOAsyncChannelOutboundWriter<HTTPRequestPart>) async throws -> (Result)) async throws -> Result {
+    typealias ClientHandler<Result> = (NIOAsyncChannelInboundStream<HTTPResponsePart>, NIOAsyncChannelOutboundWriter<HTTPRequestPart>) async throws -> (Result)
+
+    static func execute<Result>(host: String, port: Int, _ work: @escaping ClientHandler<Result>) async throws -> Result {
         let channel : NIOAsyncChannel = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEPORT), value: 1)
@@ -364,7 +386,7 @@ enum SimpleClient {
 }
 
 extension NIOAsyncChannelInboundStream<HTTPResponsePart> {
-    func readFullResponse() async throws -> (HTTPResponse, ByteBuffer) {
+    func readFullResponse() async throws -> (HTTPResponse, ByteBuffer, HTTPFields?) {
         var response: HTTPResponse?
         var body = ByteBuffer()
         for try await part in self {
@@ -373,11 +395,11 @@ extension NIOAsyncChannelInboundStream<HTTPResponsePart> {
                 response = head
             case .body(var buf):
                 body.writeBuffer(&buf)
-            case .end:
+            case .end(let trailers):
                 guard let response = response else {
                     throw HTTPError.unexpectedHTTPPart(part)
                 }
-                return (response, body)
+                return (response, body, trailers)
             }
         }
         throw HTTPError.unexpectedHTTPPart(nil)
