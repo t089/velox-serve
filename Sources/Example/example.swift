@@ -28,8 +28,8 @@ struct Example: AsyncParsableCommand {
         }()
 
         let server = try await Server.start(
-            host: host, port: port, group: elg, logger: logger,
-            handler: AnyHandler(loggingServe(logger, serve: self.serve)))
+            host: host, port: port, name: "Example", group: elg, logger: logger,
+            handler: AnyHandler(loggingServe(logger, serve: self.serve)).instrumented())
         
         let group = ServiceGroup(
             services: [ server ],
@@ -41,11 +41,21 @@ struct Example: AsyncParsableCommand {
 
     @Sendable func serve(req: RequestReader, res: any ResponseWriter) async throws {
         switch req.path {
-            case "/": try await res.plainText("Hello, world!\r\n")
-            case "/upload": try await upload(req: req, res: res)
-            case let path where path.hasPrefix("/chunked"): try await chunked(req: req, res: res)
-            case "/echo": try await echo(req: req, res: res)
-            case "/random": try await random(req: req, res: res)
+            case "/": 
+                req.route = "/"
+                try await res.plainText("Hello, world!\r\n")
+            case "/upload": 
+                req.route = "/upload"
+                try await upload(req: req, res: res)
+            case let path where path.hasPrefix("/chunked"): 
+                req.route = "/chunked"
+                try await chunked(req: req, res: res)
+            case "/echo":
+                req.route = "/echo"
+                try await echo(req: req, res: res)
+            case "/random":
+                req.route = "/random"
+                try await random(req: req, res: res)
 
             default: 
                 res.status = .notFound

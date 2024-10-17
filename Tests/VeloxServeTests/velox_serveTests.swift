@@ -44,6 +44,45 @@ final class VeloxServeTests: XCTestCase {
         try await server.shutdown()
     }
 
+    private func withServer<T>(handler: @escaping AnyHandler.Handler, _ body: @escaping (Server) async throws -> T) async throws ->  T {
+        let server = try await Server.start(host: "localhost", handler: AnyHandler(handler))
+    
+        return try await withThrowingDiscardingTaskGroup { group in
+            group.addTask {
+                try await server.run()
+            }
+            defer {
+                group.cancelAll()
+            }
+
+            return try await body(server)
+        }
+        
+        
+    }
+
+    func testReadingRequestPartially() async throws {
+        let result = try await withServer { req, res in
+            for try await var buffer in req.body.prefix(2) {
+                try await res.writeBodyPart(&buffer)
+            }
+        } _: { server in
+            try await SimpleClient.execute(host: "localhost", port: server.localAddress.port!) { inbound, outbound in
+                let parts = (1...10).map { "Part \($0)\r\n" }
+                try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
+                for part in parts {
+                    try await outbound.write(.body(ByteBuffer(string: part)))
+                }
+                try await outbound.write(.end(nil))
+
+                return try await inbound.readFullResponse()
+            }
+        }
+
+        XCTAssertEqual(.ok, result.0.status)
+        XCTAssertEqual("Part 1\r\nPart 2\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
+    }
+
     func testMassiveParallelism() async throws {
         actor Counter {
             var value: Int
@@ -321,5 +360,26 @@ enum SimpleClient {
             }
         
         return try await channel.executeThenClose(work)
+    }
+}
+
+extension NIOAsyncChannelInboundStream<HTTPResponsePart> {
+    func readFullResponse() async throws -> (HTTPResponse, ByteBuffer) {
+        var response: HTTPResponse?
+        var body = ByteBuffer()
+        for try await part in self {
+            switch part {
+            case .head(let head):
+                response = head
+            case .body(var buf):
+                body.writeBuffer(&buf)
+            case .end:
+                guard let response = response else {
+                    throw HTTPError.unexpectedHTTPPart(part)
+                }
+                return (response, body)
+            }
+        }
+        throw HTTPError.unexpectedHTTPPart(nil)
     }
 }

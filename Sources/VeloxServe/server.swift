@@ -39,7 +39,7 @@ public final class Server: Sendable {
     public static func start(
         host: String,
         port: Int = 0,
-        name: String,
+        name: String? = nil,
         group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
         logger: Logger = NoopLogger,
         handler: @escaping AnyHandler.Handler
@@ -58,7 +58,7 @@ public final class Server: Sendable {
     public static func start(
         host: String,
         port: Int = 0,
-        name: String,
+        name: String? = nil,
         group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
         logger: Logger = NoopLogger,
         handler: Handler
@@ -166,8 +166,8 @@ public final class Server: Sendable {
                         }) 
 
                 var logger = self.logger
-                logger[metadataKey: "path"] = .string(head.path ?? "/")
-                logger[metadataKey: "method"] = .string(head.method.rawValue)
+                logger[metadataKey: "req.path"] = .string(head.path ?? "/")
+                logger[metadataKey: "req.method"] = .string(head.method.rawValue)
                 
                 let requestReader = RequestReader(
                     logger: logger,
@@ -291,16 +291,12 @@ public class ReadableBody: AsyncSequence {
         @usableFromInline
         let trailers: EventLoopPromise<HTTPFields?>
 
-        @usableFromInline
-        var isFirstRead = true
-
         @inlinable
         public mutating func next() async throws -> ByteBuffer? {
             do {
-                if self.isFirstRead {
-                    self.underlying.fireFirstRead()
+                if let fireFirstRead = self.underlying.fireFirstRead {
+                    fireFirstRead()
                     self.underlying.fireFirstRead = nil
-                    self.isFirstRead.toggle()
                 }
                 guard let next = try await underlying._internal.next() else {
                     //trailers.succeed(nil)
@@ -379,7 +375,7 @@ func httpResponse(
     return response
 }
 
-public struct RequestReader {
+open class RequestReader {
     public var logger: Logger
     public let method: HTTPRequest.Method
     public let path: String
@@ -394,7 +390,7 @@ public struct RequestReader {
 
     public var userInfo: UserInfo = UserInfo()
 
-    public var _eventLoop: any EventLoop
+    public let _eventLoop: any EventLoop
 
     init(
         logger: Logger,

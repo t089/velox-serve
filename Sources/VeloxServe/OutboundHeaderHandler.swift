@@ -8,8 +8,8 @@ final class OutboundHeaderHandler<C : Clock> : ChannelOutboundHandler where C.In
     typealias OutboundOut = HTTPServerResponsePart
 
     let clock: C 
-    let serverName: String
-    init(clock: C, serverName: String) {
+    let serverName: String?
+    init(clock: C, serverName: String?) {
         self.clock = clock
         self.serverName = serverName
     }
@@ -23,8 +23,8 @@ final class OutboundHeaderHandler<C : Clock> : ChannelOutboundHandler where C.In
 
             var additionalHeaders : [(String, String)] = []
 
-            if head.headers["server"].isEmpty {
-                additionalHeaders.append(("Server", self.serverName))
+            if let serverName, head.headers["server"].isEmpty {
+                additionalHeaders.append(("Server", serverName))
             }
             
             if head.headers["date"].isEmpty {
