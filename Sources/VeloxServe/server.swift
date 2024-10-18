@@ -157,7 +157,7 @@ public final class Server: Sendable {
                     trailers.succeed(nil)
                 }
 
-                let body = ReadableBody(
+                let body = RootReadableBody(
                         expectedContentLength: head.expectedContentLength,
                         _internal: inboundIterator,
                         onFirstRead: {
@@ -168,11 +168,11 @@ public final class Server: Sendable {
                 logger[metadataKey: "req.path"] = .string(head.path ?? "/")
                 logger[metadataKey: "req.method"] = .string(head.method.rawValue)
                 
-                let requestReader = RequestReader(
+                let requestReader = RootRequestReader(
                     logger: logger,
                     head: head,
-                    body: body,
-                    _eventLoop: channel.channel.eventLoop)
+                    body: body)
+                requestReader.userInfo[EventLoopKey.self] = channel.channel.eventLoop
 
                 let responseWriter = RootResponseWriter(
                     allocator: channel.channel.allocator,
@@ -251,7 +251,7 @@ extension HTTPRequestHead {
     }
 }
 
-public class ReadableBody: ReadableBodyProtocol {
+internal class RootReadableBody: ReadableBody {
     public typealias Element = ByteBuffer
 
     public let expectedContentLength: Int?
@@ -292,7 +292,7 @@ public class ReadableBody: ReadableBodyProtocol {
 
     public struct AsyncIterator: AsyncIteratorProtocol {
         @usableFromInline
-        var underlying: ReadableBody
+        var underlying: RootReadableBody
 
         @inlinable
         public mutating func next() async throws -> ByteBuffer? {
@@ -380,19 +380,19 @@ func httpResponse(
     return response
 }
 
-public protocol ReadableBodyProtocol : AsyncSequence where Element == ByteBuffer {
+public protocol ReadableBody : AsyncSequence where Element == ByteBuffer {
+    var expectedContentLength: Int? { get }
     var trailers: HTTPFields? { get async throws }
 }
 
-public protocol RequestReaderProtocol : AnyObject{
-    associatedtype Body: ReadableBodyProtocol
+public protocol RequestReader : AnyObject {
     var logger: Logger { get set }
     var request: HTTPRequest { get}
-    var body: Body { get }
+    var body: AnyReadableBody { get }
     var userInfo: UserInfo { get set }
 }
 
-extension RequestReaderProtocol {
+extension RequestReader {
     public var method: HTTPRequest.Method { self.request.method }
     public var path: String { self.request.path! }
     public var headers: HTTPFields { self.request.headerFields }
@@ -403,29 +403,32 @@ extension RequestReaderProtocol {
     }
 }
 
-open class RequestReader: RequestReaderProtocol {
-    public var logger: Logger
-    public let request: HTTPRequest
-    private let _body: ReadableBody
-    public var body: ReadableBody {
-        self._body
+
+public enum EventLoopKey: UserInfoKey {
+    public typealias Value = EventLoop
+}
+
+class RootRequestReader: RequestReader {
+    var logger: Logger
+    let request: HTTPRequest
+    private let _body: RootReadableBody
+    
+    var body: AnyReadableBody {
+        AnyReadableBody(self._body)
     }
     
 
-    public var userInfo: UserInfo = UserInfo()
+    var userInfo: UserInfo = UserInfo()
 
-    public let _eventLoop: any EventLoop
 
     init(
         logger: Logger,
         head: HTTPRequest,
-        body: ReadableBody,
-        _eventLoop: any EventLoop
+        body: RootReadableBody
     ) {
         self.logger = logger
         self.request = head
         self._body = body
-        self._eventLoop = _eventLoop
     }
     
 }
@@ -588,3 +591,48 @@ internal class RootResponseWriter : ResponseWriter {
 
 
 public let NoopLogger = Logger(label: "noop", factory: SwiftLogNoOpLogHandler.init)
+
+
+public struct AnyReadableBody: ReadableBody {
+    public typealias Element = ByteBuffer
+
+    private let _underlyingNextFactory: () -> () async throws -> ByteBuffer?
+    private let _underlyingTrailers: () async throws -> HTTPFields?
+
+    public init<Body: ReadableBody>(_ body: Body)
+    where Body.Element == ByteBuffer {
+        self._underlyingNextFactory = { 
+            var iterator = body.makeAsyncIterator()
+            return { try await iterator.next() }
+         }
+        self._underlyingTrailers = { try await body.trailers }
+        self.expectedContentLength = body.expectedContentLength
+    }
+
+    public let expectedContentLength: Int?
+
+    public var trailers: HTTPFields? {
+        get async throws {
+            try await self._underlyingTrailers()
+        }
+    }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(iterator: self._underlyingNextFactory())
+    }
+
+    
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        @usableFromInline
+        var _iterator: () async throws -> Element?
+
+        init(iterator: @escaping () async throws -> Element?) {
+            self._iterator = iterator
+        }
+
+        @inlinable
+        public mutating func next() async throws -> Element? {
+            try await self._iterator()
+        }
+    }
+}

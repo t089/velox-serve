@@ -1,10 +1,10 @@
 public protocol Handler : Sendable {
-    func handle(_ request: RequestReader, _ response: any ResponseWriter) async throws -> Void
+    func handle(_ request: any RequestReader, _ response: any ResponseWriter) async throws -> Void
 }
 
 
 public struct AnyHandler: Handler {
-    public typealias Handler = @Sendable (RequestReader, any ResponseWriter) async throws -> Void
+    public typealias Handler = @Sendable (any RequestReader, any ResponseWriter) async throws -> Void
 
     @usableFromInline
     let _handler: Handler
@@ -18,7 +18,7 @@ public struct AnyHandler: Handler {
     }
     
     @inlinable
-    public func handle(_ request: RequestReader, _ response: any ResponseWriter) async throws {
+    public func handle(_ request: any RequestReader, _ response: any ResponseWriter) async throws {
         try await self._handler(request, response)
     }
 }

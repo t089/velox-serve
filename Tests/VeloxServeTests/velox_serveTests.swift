@@ -5,6 +5,9 @@ import NIO
 import HTTPTypes
 import NIOHTTPTypes
 import NIOHTTPTypesHTTP1
+import Logging
+import NIOConcurrencyHelpers
+
 
 final class VeloxServeTests: XCTestCase {
 
@@ -79,6 +82,98 @@ final class VeloxServeTests: XCTestCase {
 
         XCTAssertEqual([ xTest: "test"], result.2)
         XCTAssertEqual("EOF\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
+    }
+
+    func testInterceptingHandler() async throws {
+        final class Wrapper: RequestReader {
+            let wrapped: RequestReader
+            init(wrapped: RequestReader) {
+                self.wrapped = wrapped
+                _body = Body(wrapped.body)
+            }
+
+            var logger: Logger { 
+                get { wrapped.logger }
+                set { wrapped.logger = newValue }
+            }
+            var request: HTTPRequest { wrapped.request }
+            let _body: Body
+            var body: AnyReadableBody { AnyReadableBody(_body) }
+            var userInfo: UserInfo { 
+                get { wrapped.userInfo }
+                set { wrapped.userInfo = newValue }
+            }
+
+            final class Body: ReadableBody {
+                let wrapped: AnyReadableBody
+                init(_ wrapped: AnyReadableBody) {
+                    self.wrapped = wrapped
+                }
+
+                var expectedContentLength: Int? { wrapped.expectedContentLength }
+                var trailers: HTTPFields? { get async throws { try await wrapped.trailers } }
+
+                var bufferedData: ByteBuffer = ByteBuffer()
+
+                func makeAsyncIterator() -> AsyncIterator {
+                    AsyncIterator(underlying: wrapped.makeAsyncIterator(), body: self)
+                }
+
+                struct AsyncIterator: AsyncIteratorProtocol {
+                    typealias Element = ByteBuffer
+
+                    var underlying: AnyReadableBody.AsyncIterator
+                    let body: Body
+
+                    mutating func next() async throws -> ByteBuffer? {
+                        let next = try await underlying.next()
+                        let remainingCapacity = 16 - body.bufferedData.readableBytes
+                        if var next, remainingCapacity > 0 {
+                            var slice = next.readSlice(length: Swift.min(next.readableBytes, remainingCapacity))!
+                            body.bufferedData.writeBuffer(&slice)
+                        }
+                        return next                   
+                    }
+                }
+            }
+        }
+
+        actor Logs {
+            var logs: [String] = []
+
+            func log(_ message: String) {
+                logs.append(message)
+            }
+        }
+
+        let logger = Logs()
+
+        @Sendable
+        func reqBodyLogger(_ req: any RequestReader, _ res: any ResponseWriter, _ next: AnyHandler.Handler) async throws {
+            let wrapper = Wrapper(wrapped: req)
+            try await next(wrapper, res)
+            XCTAssertEqual(16, wrapper._body.bufferedData.readableBytes)
+            await logger.log("Request body length: \(wrapper._body.bufferedData.readableBytes)")
+            await logger.log("\(String(decoding: wrapper._body.bufferedData.readableBytesView, as: UTF8.self))")
+        }
+
+        let result = try await withServer { req, res in 
+            
+            try await reqBodyLogger(req, res) { req, res in
+                var body = try await req.body.collect(upTo: 1024)
+                try await res.writeBodyPart(&body)
+            }
+
+        } client: { inbound, outbound in 
+            try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
+            try await outbound.write(.body(ByteBuffer(string: "Hello, World\r\nThis is just a text\r\n")))
+            try await outbound.write(.end(nil)) 
+            return try await inbound.readFullResponse()
+        }
+        let collectedLogs = await logger.logs
+        XCTAssertEqual(.ok, result.0.status)
+        XCTAssertEqual("Hello, World\r\nThis is just a text\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
+        XCTAssertEqual("Hello, World\r\nTh", collectedLogs[1])
     }
 
     func testReadingRequestPartially() async throws {
