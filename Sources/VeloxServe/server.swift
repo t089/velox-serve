@@ -8,34 +8,77 @@ import NIOHTTPTypes
 import NIOHTTPTypesHTTP1
 import HTTPTypes
 import ServiceLifecycle
+import NIOConcurrencyHelpers
 
 public final class Server: Sendable {
     public enum HTTPError : Error {
         case unexpectedHTTPPart(HTTPRequestPart)
     }
 
-    typealias ServerChannel = NIOAsyncChannel<NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>, Never>
-    let serverChannel: ServerChannel
-    let quiescingHelper: ServerQuiescingHelper
-    let logger: Logger
-    let handler: Handler
-    
-    public let eventLoopGroup: EventLoopGroup
-
-    init(
-        serverChannel: ServerChannel,
-        quiescingHelper: ServerQuiescingHelper,
-        logger: Logger = NoopLogger,
-        handler: Handler,
-        eventLoopGroup: EventLoopGroup
-    ) {
-        self.serverChannel = serverChannel
-        self.quiescingHelper = quiescingHelper
-        self.logger = logger
-        self.handler = handler
-        self.eventLoopGroup = eventLoopGroup
+    public enum ServerError : Error {
+        case alreadyStarted
+        case shuttingDown
     }
 
+    typealias ServerChannel = NIOAsyncChannel<NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>, Never>
+    
+    enum State {
+        case initialized(Configuration)
+        case starting(waiters: [CheckedContinuation<State.Running, Error>])
+        case running(Running)
+        case shuttingDown(serverChannel: ServerChannel, quiescingHelper: ServerQuiescingHelper, logger: Logger, handler: Handler)
+        case shutdown
+
+        struct Running {
+            let serverChannel: ServerChannel
+            let quiescingHelper: ServerQuiescingHelper
+            let logger: Logger
+            let handler: Handler
+            let shutdownSignal: (AsyncStream<Void>.Continuation, AsyncStream<Void>)
+        }
+    }
+
+    private let state: NIOLockedValueBox<State>
+    
+    struct Configuration {
+        var host: String
+        var port: Int = 0
+        var name: String?
+        var group: EventLoopGroup
+        var logger: Logger
+        var handler: Handler
+    }
+
+    public convenience init(
+        host: String,
+        port: Int = 0,
+        name: String? = nil,
+        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+        logger: Logger = NoopLogger,
+        handler: @escaping AnyHandler.Handler
+    ) {
+        self.init(
+            host: host,
+            port: port,
+            name: name,
+            group: group,
+            logger: logger,
+            handler: AnyHandler(handler)
+        )
+    }
+
+    public init(
+        host: String,
+        port: Int = 0,
+        name: String? = nil,
+        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+        logger: Logger = NoopLogger,
+        handler: Handler
+    ) {
+        self.state = NIOLockedValueBox(.initialized(Configuration(host: host, port: port, name: name, group: group, logger: logger, handler: handler)))
+    }
+
+    @available(*, deprecated, message: "use init() instead")
     public static func start(
         host: String,
         port: Int = 0,
@@ -54,7 +97,7 @@ public final class Server: Sendable {
         )
     }
 
-    // TODO: move start into run method
+    @available(*, deprecated, message: "use init() instead")
     public static func start(
         host: String,
         port: Int = 0,
@@ -63,10 +106,74 @@ public final class Server: Sendable {
         logger: Logger = NoopLogger,
         handler: Handler
     ) async throws -> Server {
-        
-        let quiescingHelper = ServerQuiescingHelper(group: group)
 
-        let socketBootstrap = ServerBootstrap(group: group)
+        return Server(
+            host: host,
+            port: port,
+            name: name,
+            group: group,
+            logger: logger,
+            handler: handler)
+        
+    }
+
+
+    /// Bind the server to the given `host` and `port` and start listening for incoming connections.
+    ///
+    /// You must call `run` after calling this method to start processing incoming requests.
+    @discardableResult
+    public func start() async throws -> SocketAddress {
+        let running = try await self._start()
+        return running.serverChannel.channel.localAddress!
+    }
+
+    private func _start() async throws -> State.Running {
+        enum Action {
+            case continueStartup(Configuration)
+            case returnRunningState(State.Running)
+            case waitForRunningState([CheckedContinuation<State.Running, Error>])
+            case throwAlreadyShutdown
+        }
+
+        let lock = self.state.unsafe
+        lock.lock()
+        let action : Action = lock.withValueAssumingLockIsAcquired { state in
+            switch state {
+                case .initialized(let config):
+                    state = .starting(waiters: [])
+                    return .continueStartup(config)
+                case .running(let running):
+                    return .returnRunningState(running)
+                case .starting(waiters: let waiters):
+                    return .waitForRunningState(waiters)
+                default:
+                    return .throwAlreadyShutdown
+            }
+        }
+
+        let configuration: Configuration
+        switch action {
+            case .continueStartup(let config):
+                configuration = config
+                lock.unlock()
+            case .returnRunningState(let running):
+                lock.unlock()
+                return running
+            case .waitForRunningState(var waiters):
+                return try await withCheckedThrowingContinuation { continuation in
+                    waiters.append(continuation)
+                    lock.withValueAssumingLockIsAcquired { value in
+                        value = .starting(waiters: waiters)
+                    }
+                    lock.unlock()
+                }
+            case .throwAlreadyShutdown:
+                throw ServerError.shuttingDown
+        }
+
+        let quiescingHelper = ServerQuiescingHelper(group: configuration.group)
+
+        let socketBootstrap = ServerBootstrap(group: configuration.group)
             // Specify backlog and enable SO_REUSEADDR for the server itself
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -85,7 +192,7 @@ public final class Server: Sendable {
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelOption(ChannelOptions.autoRead, value: true)
 
-        let channel = try await socketBootstrap.bind(host: host, port: port, serverBackPressureStrategy: nil) 
+        let channel = try await socketBootstrap.bind(host: configuration.host, port: configuration.port, serverBackPressureStrategy: nil) 
         { channel -> EventLoopFuture<NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>> in 
             channel.eventLoop.makeCompletedFuture {
                 try channel.pipeline.syncOperations.configureHTTPServerPipeline(
@@ -93,9 +200,9 @@ public final class Server: Sendable {
                     withServerUpgrade: nil, 
                     withErrorHandling: true,
                     withOutboundHeaderValidation: false)
-                try channel.pipeline.syncOperations.addHandler(ChannelQuiescingHandler(logger: logger))
+                try channel.pipeline.syncOperations.addHandler(ChannelQuiescingHandler(logger: configuration.logger))
                 try channel.pipeline.syncOperations.addHandler(AutomaticContinueHandler())
-                try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: name))
+                try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: configuration.name))
                 try channel.pipeline.syncOperations.addHandler(HTTP1ToHTTPServerCodec(secure: false))
                 
                 return try NIOAsyncChannel(
@@ -104,45 +211,85 @@ public final class Server: Sendable {
             }
         }
 
-        return Server(
-            serverChannel: channel,
-            quiescingHelper: quiescingHelper,
-            logger: logger,
-            handler: handler,
-            eventLoopGroup: group)
+        let (waiters, runningState) = self.state.withLockedValue { state in
+            guard case .starting(let waiters) = state else {
+                preconditionFailure("Server is not in the starting state.")
+            }
+            var continuation: AsyncStream<Void>.Continuation!
+            let stream = AsyncStream<Void>() { continuation = $0 }
+            let runningState = State.Running(serverChannel: channel, quiescingHelper: quiescingHelper, logger: configuration.logger, handler: configuration.handler, shutdownSignal: (continuation, stream))
+            state = .running(runningState)
+            return (waiters, runningState)
+        }
+
+        for waiter in waiters {
+            waiter.resume(returning: runningState)
+        }
+
+        return runningState
     }
 
-    public var localAddress: SocketAddress {
-        serverChannel.channel.localAddress!
+    public var localAddress: SocketAddress? {
+        self.state.withLockedValue { state -> SocketAddress? in
+            guard case let .running(running) = state else {
+                return nil
+            }
+            return running.serverChannel.channel.localAddress
+        }
     }
 
     public func run() async throws {
-        //let closePromise = serverChannel.channel.eventLoop.makePromise(of: Void.self)
         try await withGracefulShutdownHandler {
-            try await withThrowingDiscardingTaskGroup { group in
-                try await serverChannel.executeThenClose { inbound in
-                    logger.info("Listening for connections on \(self.localAddress) ...")
-                    for try await channel in inbound.cancelOnGracefulShutdown() {
-                        group.addTask { [logger] in 
-                            do { 
-                                try await self.handle(channel: channel)
-                            } catch {
-                                logger.trace("Error handling connection: \(error)")
+            let running = try await self._start()
+            let serverChannel = running.serverChannel
+            let logger = running.logger
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for try await  _ in running.shutdownSignal.1 { }
+                }
+
+                group.addTask {
+                    try await withThrowingDiscardingTaskGroup { group in
+                        try await serverChannel.executeThenClose { inbound in
+                            logger.info("Listening for connections on \(serverChannel.channel.localAddress!) ...")
+                            defer {
+                                logger.info("Stopped listening for new connections.")
+                            }
+                            for try await channel in inbound.cancelOnGracefulShutdown() {
+                                group.addTask { [logger] in 
+                                    do { 
+                                        try await self.handle(channel: channel, running: running)
+                                    } catch {
+                                        logger.trace("Error handling connection: \(error)")
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                logger.info("Stopped listening for new connections.")
+                
+                try await group.next()
+                group.cancelAll()
             }
+            
             logger.info("Server shutdown complete.")
+            self.state.withLockedValue { $0 = .shutdown }
         } onGracefulShutdown: {
-            self.quiescingHelper.initiateShutdown(promise: nil)
+            let quiescingHelper: ServerQuiescingHelper? = self.state.withLockedValue { state in
+                guard case let .running(running) = state else {
+                    return nil
+                }
+                state = .shuttingDown(serverChannel: running.serverChannel, quiescingHelper: running.quiescingHelper, logger: running.logger, handler: running.handler)
+                return running.quiescingHelper
+            }
+
+            quiescingHelper?.initiateShutdown(promise: nil)
         }
         
     }
 
     private
-    func handle(channel: NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>) async throws {
+    func handle(channel: NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>, running: State.Running) async throws {
         try await channel.executeThenClose { inbound, outbound in
             var inboundIterator = inbound.makeAsyncIterator()
             
@@ -164,7 +311,7 @@ public final class Server: Sendable {
                             channel.channel.triggerUserOutboundEvent(FirstReadEvent(), promise: nil)
                         }) 
 
-                var logger = self.logger
+                var logger = running.logger
                 logger[metadataKey: "req.path"] = .string(head.path ?? "/")
                 logger[metadataKey: "req.method"] = .string(head.method.rawValue)
                 
@@ -180,7 +327,7 @@ public final class Server: Sendable {
                     responsePartWriter: outbound,
                     head: httpResponse(request: head, status: .ok, headers: [:]))
 
-                try await self.handler.handle(requestReader, responseWriter)
+                try await running.handler.handle(requestReader, responseWriter)
                 
                 if !body.wasRead {
                     // if the body was not read, we need to consume it
@@ -213,24 +360,32 @@ public final class Server: Sendable {
         }
     }
 
-    public func shutdown() async throws {
-        try await serverChannel.channel.close()
+    public func shutdown() {
+        enum Action {
+            case finishContinuation(AsyncStream<Void>.Continuation)
+            case doNothing
+        }
+
+        let action : Action  = self.state.withLockedValue { state in
+            switch state {
+                case .running(let running):
+                    state = .shuttingDown(serverChannel: running.serverChannel, quiescingHelper: running.quiescingHelper, logger: running.logger, handler: running.handler)
+                    return .finishContinuation(running.shutdownSignal.0)
+                default:
+                    return .doNothing
+            }
+        }
+
+        switch action {
+            case .finishContinuation(let continuation):
+                continuation.finish()
+            case .doNothing:
+                break
+        }
     }
 
     public func shutdownGracefully() async throws {
-        let p = self.eventLoopGroup.next().makePromise(of: Void.self)
-        quiescingHelper.initiateShutdown(promise: p)
-        try await withTaskCancellationHandler(
-            operation: {
-                try await p.futureResult.get()
-            },
-            onCancel: {
-                serverChannel.channel.close(promise: p)
-            })
-    }
-
-    public func shutdownGracefully() {
-        quiescingHelper.initiateShutdown(promise: nil)
+        // TODO: signal graceful shutdown to the server
     }
 }
 

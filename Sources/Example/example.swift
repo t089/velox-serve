@@ -27,7 +27,7 @@ struct Example: AsyncParsableCommand {
             return logger
         }()
 
-        let server = try await Server.start(
+        let server = Server(
             host: host, port: port, name: "Example", group: elg, logger: logger,
             handler: AnyHandler(loggingServe(logger, serve: self.serve)).instrumented())
         

@@ -24,7 +24,12 @@ let benchmarks : @Sendable () -> Benchmark? =  { @Sendable () -> Benchmark? in
             }
         }
 
-        let port = server.localAddress.port!
+        Task {
+            try await server.run()
+        }
+        defer { server.shutdown() }
+
+        let port = server.localAddress!.port!
         var request = HTTPClientRequest(url: "http://127.0.0.1:\(port)/echo") 
         request.method = .POST
         

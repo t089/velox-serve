@@ -13,6 +13,8 @@ final class VeloxServeTests: XCTestCase {
 
     var client: HTTPClient!
 
+     
+
     override func setUp() async throws {
         client = HTTPClient(eventLoopGroupProvider: .shared(NIOSingletons.posixEventLoopGroup))
     }
@@ -23,7 +25,7 @@ final class VeloxServeTests: XCTestCase {
 
     // configure a server and connect with a client
     private func withServer<T>(handler: @escaping AnyHandler.Handler, client: @escaping SimpleClient.ClientHandler<T>) async throws ->  T {
-        let server = try await Server.start(host: "localhost", handler: AnyHandler(handler))
+        let server = Server(host: "localhost", handler: AnyHandler(handler))
     
         return try await withThrowingDiscardingTaskGroup { group in
             group.addTask {
@@ -32,23 +34,23 @@ final class VeloxServeTests: XCTestCase {
             defer {
                 group.cancelAll()
             }
-
-            return try await SimpleClient.execute(host: "localhost", port: server.localAddress.port!, client)
+            let address = try await server.start()
+            return try await SimpleClient.execute(host: "localhost", port: address.port!, client)
         }
     }
 
     func testSimpleGet() async throws {
-        let server = try await Server.start(host: "localhost", name: "velox-serve") { req, res in 
+        let server = Server(host: "localhost", name: "velox-serve") { req, res in 
             try await res.plainText("Hello, World")
         }
-
+        let localAddress = try await server.start()
         let serverTask = Task {
             try await server.run()
         }
         defer { serverTask.cancel() } 
 
         
-        let req =  HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
+        let req =  HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
         let response = try await client.execute(req, deadline: .now() + .seconds(2))
         let body = try await response.body.collect(upTo: 1024).readableBytesView
         XCTAssertEqual(.ok, response.status)
@@ -58,8 +60,22 @@ final class VeloxServeTests: XCTestCase {
 
         let dateRegex : Regex = ##/(Mon|Tue|Wed|Thu|Fri|Sat|Sun), ([0-3][0-9]) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([0-9]{4}) ([01][0-9]|2[0-3])(:[0-5][0-9]){2} GMT$/##
         try _ = dateRegex.wholeMatch(in: response.headers.first(name: "Date") ?? "")
+    }
 
-        try await server.shutdown()
+    func testShutdownMethod() async throws {
+        let server = Server.init(host: "localhost", name: "velox-serve") { req, res in 
+            try await res.plainText("Hello, World")
+        }
+
+        
+        let serverTask = Task {
+            try await server.run()
+        }
+        
+        try await Task.sleep(for: .seconds(1))
+
+        server.shutdown()
+        let _ = try await serverTask.value
     }
 
     func testTrailers() async throws {
@@ -77,7 +93,9 @@ final class VeloxServeTests: XCTestCase {
             try await outbound.write(.body(ByteBuffer(string: "Hello, World\r\n")))
             try await outbound.write(.end([xTest: "test"]))
 
-            return try await inbound.readFullResponse()
+            let response = try await inbound.readFullResponse()
+            print("Full response: \(response)")
+            return response
         }
 
         XCTAssertEqual([ xTest: "test"], result.2)
@@ -212,10 +230,12 @@ final class VeloxServeTests: XCTestCase {
 
         let counter = Counter(initialValue: 0)
 
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = Server(host: "localhost") { req, res in 
             let v = await counter.increment()
             try await res.plainText("\(v)")
         }
+
+        try await server.start()
 
         let serverTask = Task {
             try await server.run()
@@ -228,7 +248,7 @@ final class VeloxServeTests: XCTestCase {
             
             for _ in 0..<N {
                 group.addTask { [client] in
-                    let req = HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
+                    let req = HTTPClientRequest(url: "http://localhost:\(server.localAddress!.port!)/")
                     let response = try await client!.execute(req, deadline: .now() + .seconds(2))
                     let body = try await response.body.collect(upTo: 1024).readableBytesView
                     return Int(String(decoding: body, as: UTF8.self))!
@@ -255,7 +275,7 @@ final class VeloxServeTests: XCTestCase {
 
 
     func testRedirect() async throws {
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = Server(host: "localhost") { req, res in 
             switch req.path {
                 case "/first":
                     res.status = .permanentRedirect
@@ -267,12 +287,14 @@ final class VeloxServeTests: XCTestCase {
             }
         }
 
+        let localAddress = try await server.start()
+
         let serverTask = Task {
             try await server.run()
         }
         defer { serverTask.cancel() } 
         
-        let req =  HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/first")
+        let req =  HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/first")
         let response = try await client.execute(req, deadline: .now() + .seconds(2))
         let body = try await response.body.collect(upTo: 1024).readableBytesView
         XCTAssertEqual(.ok, response.status)
@@ -294,7 +316,7 @@ final class VeloxServeTests: XCTestCase {
 
         let uploadedData = UploadedData()
 
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = Server(host: "localhost") { req, res in 
             XCTAssertEqual(req.method, .post)
             XCTAssertEqual(req.body.expectedContentLength, size)
             let data = try await req.body.collect(upTo: req.body.expectedContentLength ?? .max)
@@ -302,7 +324,7 @@ final class VeloxServeTests: XCTestCase {
             try await res.plainText("Uploaded \(data.readableBytes) bytes")
             await uploadedData.setData(data)
         }
-
+        let localAddress = try await server.start()
         let serverTask = Task {
             try await server.run()
         }
@@ -313,7 +335,7 @@ final class VeloxServeTests: XCTestCase {
             uploadData.writeInteger(UInt8.random(in: 0...UInt8.max))
         }
 
-        var req = HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
+        var req = HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
         req.body = .bytes(uploadData)
         req.method = .POST
 
@@ -328,7 +350,7 @@ final class VeloxServeTests: XCTestCase {
     func testUploadTooLarge() async throws {
         let size = 1024 * 64 // 64kb
 
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = Server(host: "localhost") { req, res in 
             XCTAssertEqual(req.method, .post)
             XCTAssertEqual(req.body.expectedContentLength, size)
             do {
@@ -340,13 +362,13 @@ final class VeloxServeTests: XCTestCase {
             }
             
         }
-
+        let localAddress = try await server.start()
         let serverTask = Task {
             try await server.run()
         }
         defer { serverTask.cancel() } 
 
-        var req = HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
+        var req = HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
         req.body = .bytes([UInt8](repeating: 0, count: size))
         req.method = .POST
 
@@ -371,16 +393,17 @@ final class VeloxServeTests: XCTestCase {
 
         let counter = Counter()
 
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = Server(host: "localhost") { req, res in 
             try await res.plainText("\(counter.increment())")
         }
 
+        let port = try await server.start().port!
         let serverTask = Task {
             try await server.run()
         }
         defer { serverTask.cancel() } 
 
-        let port = server.localAddress.port!
+        
 
         let responses : [Int] = try await withThrowingTaskGroup(of: Int?.self) { group in 
             for _ in 0..<N {
@@ -410,7 +433,7 @@ final class VeloxServeTests: XCTestCase {
     func testStreamingEcho() async throws {
         let size = 1024 * 128 // 128kb
 
-        let server = try await Server.start(host: "localhost") { req, res in 
+        let server = Server(host: "localhost") { req, res in 
             XCTAssertEqual(req.method, .post)
             XCTAssertEqual(req.body.expectedContentLength, size)
             
@@ -421,6 +444,7 @@ final class VeloxServeTests: XCTestCase {
             try await res.end()
         }
 
+        let localAddress = try await server.start()
         let serverTask = Task {
             try await server.run()
         }
@@ -429,7 +453,7 @@ final class VeloxServeTests: XCTestCase {
         
         let chunkSize = 1024
         var sentBytes = 0
-        var req = HTTPClientRequest(url: "http://localhost:\(server.localAddress.port!)/")
+        var req = HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
         let stream = AsyncStream<ByteBuffer>() { cont in 
             var buffer = ByteBuffer()
             for _ in 0..<(size / chunkSize) {
