@@ -5,19 +5,31 @@ import VeloxServe
 import Dispatch
 import ServiceLifecycle
 
-@main
-struct Example: AsyncParsableCommand {
-    @Option
-    var listen: String
 
-    func run() async throws {
-        LoggingSystem.bootstrap(StreamLogHandler.standardOutput)
+struct ListenAddress {
+    var host: String
+    var port: Int
+}
 
-        var hostAndPort = self.listen.split(
+extension ListenAddress: ExpressibleByArgument {
+    init?(argument: String) {
+        var hostAndPort = argument.split(
             separator: ":", maxSplits: 1, omittingEmptySubsequences: true)
         let (host, port) = (
             String(hostAndPort.removeFirst()), hostAndPort.first.flatMap { Int(String($0)) } ?? 0
         )
+
+        self.init(host: host, port: port)
+    }
+}
+
+@main
+struct Example: AsyncParsableCommand {
+    @Option
+    var listen: ListenAddress
+
+    func run() async throws {
+        LoggingSystem.bootstrap(StreamLogHandler.standardOutput)
 
         let elg = MultiThreadedEventLoopGroup.singleton
 
@@ -28,7 +40,7 @@ struct Example: AsyncParsableCommand {
         }()
 
         let server = Server(
-            host: host, port: port, name: "Example", group: elg, logger: logger,
+            host: self.listen.host, port: self.listen.port, name: "Example", group: elg, logger: logger,
             handler: AnyHandler(loggingServe(logger, serve: self.serve)).instrumented())
         
         let group = ServiceGroup(

@@ -9,12 +9,11 @@ You respond to HTTP requests by providing an async function `(RequestReader, ino
 ```swift
 import VeloxServe
 
-let server = try await Server.start(
+let server = Server(
     host: "localhost", 
     port: 8080) { req, res in 
     try await res.plainText("Hello, World!\r\n")
 }
 
-logger.info("Server listening on: \(server.localAddress)")
 try await server.run()
 ```

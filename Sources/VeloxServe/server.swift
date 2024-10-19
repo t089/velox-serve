@@ -202,7 +202,8 @@ public final class Server: Sendable {
         }
     }
 
-    public func run() async throws {
+    /// Start the server and run the loop to process incoming requests.
+    public func listenAndServe() async throws {
         try await withGracefulShutdownHandler {
             let running = try await self._start()
             let serverChannel = running.serverChannel
@@ -373,7 +374,11 @@ public final class Server: Sendable {
     }
 }
 
-extension Server : Service {}
+extension Server : Service {
+    public func  run() async throws {
+        try await self.listenAndServe()
+    }
+}
 
 public struct ConnectionClosedError: Error {}
 
