@@ -12,7 +12,7 @@ let client = HTTPClient.shared
 let benchmarks : @Sendable () -> Benchmark? =  { @Sendable () -> Benchmark? in
     Benchmark("SomeBenchmark") {  (benchmark: Benchmark) async throws -> () in
         
-        let server = try await Server.start(host: "127.0.0.1") { req, res in 
+        let server = Server(host: "127.0.0.1") { req, res in 
             switch req.path {
                 case "/echo":
                     for try await var chunk in req.body {
@@ -24,20 +24,26 @@ let benchmarks : @Sendable () -> Benchmark? =  { @Sendable () -> Benchmark? in
             }
         }
 
-        Task {
-            try await server.run()
-        }
-        defer { server.shutdown() }
+        
 
-        let port = server.localAddress!.port!
+        let port = try await server.start().port!
         var request = HTTPClientRequest(url: "http://127.0.0.1:\(port)/echo") 
         request.method = .POST
         
-        for i in benchmark.scaledIterations {
-            request.body = .bytes(Array("Hello, world #\(i)!".utf8))
-            let response : HTTPClientResponse = try await client.execute(request, deadline: NIODeadline.now() + .seconds(2))
-            _ = try await response.body.collect(upTo: Int.max)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await server.run()
+            }
+
+            for i in benchmark.scaledIterations {
+                request.body = .bytes(Array("Hello, world #\(i)!".utf8))
+                let response : HTTPClientResponse = try await client.execute(request, deadline: NIODeadline.now() + .seconds(2))
+                _ = try await response.body.collect(upTo: Int.max)
+            }
+
+            group.cancelAll()
         }
+        
     }
     // Add additional benchmarks here
 }

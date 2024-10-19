@@ -78,46 +78,6 @@ public final class Server: Sendable {
         self.state = NIOLockedValueBox(.initialized(Configuration(host: host, port: port, name: name, group: group, logger: logger, handler: handler)))
     }
 
-    @available(*, deprecated, message: "use init() instead")
-    public static func start(
-        host: String,
-        port: Int = 0,
-        name: String? = nil,
-        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
-        logger: Logger = NoopLogger,
-        handler: @escaping AnyHandler.Handler
-    ) async throws -> Server {
-        try await Self.start(
-            host: host,
-            port: port,
-            name: name,
-            group: group,
-            logger: logger,
-            handler: AnyHandler(handler)
-        )
-    }
-
-    @available(*, deprecated, message: "use init() instead")
-    public static func start(
-        host: String,
-        port: Int = 0,
-        name: String? = nil,
-        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
-        logger: Logger = NoopLogger,
-        handler: Handler
-    ) async throws -> Server {
-
-        return Server(
-            host: host,
-            port: port,
-            name: name,
-            group: group,
-            logger: logger,
-            handler: handler)
-        
-    }
-
-
     /// Bind the server to the given `host` and `port` and start listening for incoming connections.
     ///
     /// You must call `run` after calling this method to start processing incoming requests.
@@ -211,15 +171,19 @@ public final class Server: Sendable {
             }
         }
 
-        let (waiters, runningState) = self.state.withLockedValue { state in
-            guard case .starting(let waiters) = state else {
-                preconditionFailure("Server is not in the starting state.")
+        let (waiters, runningState) = try self.state.withLockedValue { state in
+            switch state {
+                case .starting(waiters: let waiters):
+                    var continuation: AsyncStream<Void>.Continuation!
+                    let stream = AsyncStream<Void>() { continuation = $0 }
+                    let runningState = State.Running(serverChannel: channel, quiescingHelper: quiescingHelper, logger: configuration.logger, handler: configuration.handler, shutdownSignal: (continuation, stream))
+                    state = .running(runningState)
+                    return (waiters, runningState)
+                case .shutdown: // we got shutdown while starting up
+                    throw ServerError.shuttingDown
+                case .initialized, .running, .shuttingDown:
+                    preconditionFailure("Invalid state while starting: \(state)")
             }
-            var continuation: AsyncStream<Void>.Continuation!
-            let stream = AsyncStream<Void>() { continuation = $0 }
-            let runningState = State.Running(serverChannel: channel, quiescingHelper: quiescingHelper, logger: configuration.logger, handler: configuration.handler, shutdownSignal: (continuation, stream))
-            state = .running(runningState)
-            return (waiters, runningState)
         }
 
         for waiter in waiters {
@@ -275,15 +239,35 @@ public final class Server: Sendable {
             logger.info("Server shutdown complete.")
             self.state.withLockedValue { $0 = .shutdown }
         } onGracefulShutdown: {
-            let quiescingHelper: ServerQuiescingHelper? = self.state.withLockedValue { state in
-                guard case let .running(running) = state else {
-                    return nil
+            enum Action {
+                case doNothing
+                case triggerShutdown(ServerQuiescingHelper)
+                case signalFailure([CheckedContinuation<State.Running, Error>])
+            }
+            let action: Action = self.state.withLockedValue { state in
+                switch state {
+                    case .initialized, .shutdown, .shuttingDown:
+                        return .doNothing
+                    case .starting(let waiters):
+                        state = .shutdown
+                        return .signalFailure(waiters)
+                    case .running(let running):
+                        state = .shuttingDown(serverChannel: running.serverChannel, quiescingHelper: running.quiescingHelper, logger: running.logger, handler: running.handler)
+                        return .triggerShutdown(running.quiescingHelper)
                 }
-                state = .shuttingDown(serverChannel: running.serverChannel, quiescingHelper: running.quiescingHelper, logger: running.logger, handler: running.handler)
-                return running.quiescingHelper
             }
 
-            quiescingHelper?.initiateShutdown(promise: nil)
+            switch action {
+                case .triggerShutdown(let quiescingHelper):
+                    quiescingHelper.initiateShutdown(promise: nil)
+                case .signalFailure(let waiters):
+                    for waiter in waiters {
+                        waiter.resume(throwing: ServerError.shuttingDown)
+                    }
+                case .doNothing:
+                    break
+            }
+            
         }
         
     }

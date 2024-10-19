@@ -72,7 +72,7 @@ final class VeloxServeTests: XCTestCase {
             try await server.run()
         }
         
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .milliseconds(100))
 
         server.shutdown()
         let _ = try await serverTask.value
@@ -332,7 +332,7 @@ final class VeloxServeTests: XCTestCase {
 
         var uploadData = ByteBufferAllocator().buffer(capacity: size)
         for _ in 0..<size {
-            uploadData.writeInteger(UInt8.random(in: 0...UInt8.max))
+            uploadData.writeInteger(UInt8.random(in: .min ... .max))
         }
 
         var req = HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
