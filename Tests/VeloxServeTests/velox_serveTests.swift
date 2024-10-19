@@ -13,8 +13,6 @@ final class VeloxServeTests: XCTestCase {
 
     var client: HTTPClient!
 
-     
-
     override func setUp() async throws {
         client = HTTPClient(eventLoopGroupProvider: .shared(NIOSingletons.posixEventLoopGroup))
     }
