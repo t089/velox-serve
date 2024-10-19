@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import VeloxServe
 import AsyncHTTPClient
 import NIO
@@ -9,15 +9,15 @@ import Logging
 import NIOConcurrencyHelpers
 
 
-final class VeloxServeTests: XCTestCase {
+final class VeloxServeTests {
 
     var client: HTTPClient!
 
-    override func setUp() async throws {
+    init() async throws {
         client = HTTPClient(eventLoopGroupProvider: .shared(NIOSingletons.posixEventLoopGroup))
     }
 
-    override func tearDown() {
+    deinit {
         try! client.syncShutdown()
     }
 
@@ -37,6 +37,7 @@ final class VeloxServeTests: XCTestCase {
         }
     }
 
+    @Test
     func testSimpleGet() async throws {
         let server = Server(host: "localhost", name: "velox-serve") { req, res in 
             try await res.plainText("Hello, World")
@@ -51,21 +52,21 @@ final class VeloxServeTests: XCTestCase {
         let req =  HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
         let response = try await client.execute(req, deadline: .now() + .seconds(2))
         let body = try await response.body.collect(upTo: 1024).readableBytesView
-        XCTAssertEqual(.ok, response.status)
-        XCTAssertEqual("Hello, World", String(decoding: body, as: UTF8.self))
-        XCTAssertNotNil(response.headers.first(name: "Date"))
-        XCTAssertEqual("velox-serve", response.headers.first(name: "Server"))
+        #expect(.ok == response.status)
+        #expect("Hello, World" == String(decoding: body, as: UTF8.self))
+        #expect(response.headers.first(name: "Date") != nil)
+        #expect("velox-serve" == response.headers.first(name: "Server"))
 
         let dateRegex : Regex = ##/(Mon|Tue|Wed|Thu|Fri|Sat|Sun), ([0-3][0-9]) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([0-9]{4}) ([01][0-9]|2[0-3])(:[0-5][0-9]){2} GMT$/##
         try _ = dateRegex.wholeMatch(in: response.headers.first(name: "Date") ?? "")
     }
 
+    @Test
     func testShutdownMethod() async throws {
         let server = Server.init(host: "localhost", name: "velox-serve") { req, res in 
             try await res.plainText("Hello, World")
         }
 
-        
         let serverTask = Task {
             try await server.run()
         }
@@ -74,14 +75,14 @@ final class VeloxServeTests: XCTestCase {
 
         server.shutdown()
         let _ = try await serverTask.value
+        #expect(true) // Just to ensure no exceptions are thrown
     }
 
+    @Test
     func testTrailers() async throws {
         let xTest = HTTPField.Name("x-test")!
         let result = try await withServer { req, res in 
-            // reading trailers before the body, discards the body
             res.trailers = try await req.trailers
-            // this should not do anything
             for try await var buffer in req.body {
                 try await res.writeBodyPart(&buffer)
             }
@@ -92,14 +93,14 @@ final class VeloxServeTests: XCTestCase {
             try await outbound.write(.end([xTest: "test"]))
 
             let response = try await inbound.readFullResponse()
-            print("Full response: \(response)")
             return response
         }
 
-        XCTAssertEqual([ xTest: "test"], result.2)
-        XCTAssertEqual("EOF\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
+        #expect([xTest: "test"] == result.2)
+        #expect("EOF\r\n" == String(decoding: result.1.readableBytesView, as: UTF8.self))
     }
 
+    @Test
     func testInterceptingHandler() async throws {
         final class Wrapper: RequestReader {
             let wrapped: RequestReader
@@ -168,52 +169,50 @@ final class VeloxServeTests: XCTestCase {
         func reqBodyLogger(_ req: any RequestReader, _ res: any ResponseWriter, _ next: AnyHandler.Handler) async throws {
             let wrapper = Wrapper(wrapped: req)
             try await next(wrapper, res)
-            XCTAssertEqual(16, wrapper._body.bufferedData.readableBytes)
+            #expect(16 == wrapper._body.bufferedData.readableBytes)
             await logger.log("Request body length: \(wrapper._body.bufferedData.readableBytes)")
             await logger.log("\(String(decoding: wrapper._body.bufferedData.readableBytesView, as: UTF8.self))")
         }
 
         let result = try await withServer { req, res in 
-            
             try await reqBodyLogger(req, res) { req, res in
                 var body = try await req.body.collect(upTo: 1024)
                 try await res.writeBodyPart(&body)
             }
-
         } client: { inbound, outbound in 
             try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
             try await outbound.write(.body(ByteBuffer(string: "Hello, World\r\nThis is just a text\r\n")))
             try await outbound.write(.end(nil)) 
             return try await inbound.readFullResponse()
         }
+        
         let collectedLogs = await logger.logs
-        XCTAssertEqual(.ok, result.0.status)
-        XCTAssertEqual("Hello, World\r\nThis is just a text\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
-        XCTAssertEqual("Hello, World\r\nTh", collectedLogs[1])
+        #expect(.ok == result.0.status)
+        #expect("Hello, World\r\nThis is just a text\r\n" == String(decoding: result.1.readableBytesView, as: UTF8.self))
+        #expect("Hello, World\r\nTh" == collectedLogs[1])
     }
 
+    @Test
     func testReadingRequestPartially() async throws {
         let result = try await withServer { req, res in
             for try await var buffer in req.body.prefix(2) {
                 try await res.writeBodyPart(&buffer)
             }
         } client: { inbound, outbound in
-        
             let parts = (1...10).map { "Part \($0)\r\n" }
             try await outbound.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
             for part in parts {
                 try await outbound.write(.body(ByteBuffer(string: part)))
             }
             try await outbound.write(.end(nil))
-
             return try await inbound.readFullResponse()
-        
         }
 
-        XCTAssertEqual(.ok, result.0.status)
-        XCTAssertEqual("Part 1\r\nPart 2\r\n", String(decoding: result.1.readableBytesView, as: UTF8.self))
+        #expect(.ok == result.0.status)
+        #expect("Part 1\r\nPart 2\r\n" == String(decoding: result.1.readableBytesView, as: UTF8.self))
     }
 
+    @Test
     func testMassiveParallelism() async throws {
         actor Counter {
             var value: Int
@@ -243,7 +242,6 @@ final class VeloxServeTests: XCTestCase {
         let N = 1000
 
         let result = try await withThrowingTaskGroup(of: Int.self, returning: [Int].self) { group in
-            
             for _ in 0..<N {
                 group.addTask { [client] in
                     let req = HTTPClientRequest(url: "http://localhost:\(server.localAddress!.port!)/")
@@ -255,23 +253,20 @@ final class VeloxServeTests: XCTestCase {
 
             var results = [Int]()
             while let result = try await group.next() {
-                
                 results.append(result)
                 if results.count == N {
                     break
                 }
-                
             }
             group.cancelAll()
-
             return results
         }
 
-        XCTAssertEqual(N, result.count)
-        XCTAssertEqual((1...N).map({$0}), result.sorted())
+        #expect(N == result.count)
+        #expect((1...N).map({$0}) == result.sorted())
     }
 
-
+    @Test
     func testRedirect() async throws {
         let server = Server(host: "localhost") { req, res in 
             switch req.path {
@@ -295,12 +290,13 @@ final class VeloxServeTests: XCTestCase {
         let req =  HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/first")
         let response = try await client.execute(req, deadline: .now() + .seconds(2))
         let body = try await response.body.collect(upTo: 1024).readableBytesView
-        XCTAssertEqual(.ok, response.status)
-        XCTAssertEqual("OK", String(decoding: body, as: UTF8.self))
-
+        
+        #expect(.ok == response.status)
+        #expect("OK" == String(decoding: body, as: UTF8.self))
     }
 
 
+        @Test
     func testUpload() async throws {
         let size = 1024 * 1024 // 1MB
 
@@ -315,13 +311,13 @@ final class VeloxServeTests: XCTestCase {
         let uploadedData = UploadedData()
 
         let server = Server(host: "localhost") { req, res in 
-            XCTAssertEqual(req.method, .post)
-            XCTAssertEqual(req.body.expectedContentLength, size)
+            #expect(req.method == .post)
+            #expect(req.body.expectedContentLength == size)
             let data = try await req.body.collect(upTo: req.body.expectedContentLength ?? .max)
-            
             try await res.plainText("Uploaded \(data.readableBytes) bytes")
             await uploadedData.setData(data)
         }
+
         let localAddress = try await server.start()
         let serverTask = Task {
             try await server.run()
@@ -339,18 +335,19 @@ final class VeloxServeTests: XCTestCase {
 
         let response = try await client.execute(req, deadline: .now() + .seconds(6))
         let body = try await response.body.collect(upTo: 1024).readableBytesView
-        XCTAssertEqual(.ok, response.status)
-        XCTAssertEqual("Uploaded \(size) bytes", String(decoding: body, as: UTF8.self))
+        #expect(.ok == response.status)
+        #expect("Uploaded \(size) bytes" == String(decoding: body, as: UTF8.self))
         let receivedData = await uploadedData.data
-        XCTAssertEqual(uploadData, receivedData)
+        #expect(uploadData == receivedData)
     }
 
+    @Test
     func testUploadTooLarge() async throws {
         let size = 1024 * 64 // 64kb
 
         let server = Server(host: "localhost") { req, res in 
-            XCTAssertEqual(req.method, .post)
-            XCTAssertEqual(req.body.expectedContentLength, size)
+            #expect(req.method == .post)
+            #expect(req.body.expectedContentLength == size)
             do {
                 let data = try await req.body.collect(upTo: 32 * 1024)
                 try await res.plainText("Uploaded \(data.readableBytes) bytes")
@@ -358,8 +355,8 @@ final class VeloxServeTests: XCTestCase {
                 res.status = .badRequest
                 try await res.plainText("Too many bytes")
             }
-            
         }
+
         let localAddress = try await server.start()
         let serverTask = Task {
             try await server.run()
@@ -372,12 +369,11 @@ final class VeloxServeTests: XCTestCase {
 
         let response = try await client.execute(req, deadline: .now() + .seconds(6))
         let body = try await response.body.collect(upTo: 1024).readableBytesView
-        XCTAssertEqual(.badRequest, response.status)
-        XCTAssertEqual("Too many bytes", String(decoding: body, as: UTF8.self))
-
+        #expect(.badRequest == response.status)
+        #expect("Too many bytes" == String(decoding: body, as: UTF8.self))
     }
 
-
+    @Test
     func testConcurrentRequests() async throws {
         let N = 10
 
@@ -401,9 +397,7 @@ final class VeloxServeTests: XCTestCase {
         }
         defer { serverTask.cancel() } 
 
-        
-
-        let responses : [Int] = try await withThrowingTaskGroup(of: Int?.self) { group in 
+        let responses: [Int] = try await withThrowingTaskGroup(of: Int?.self) { group in 
             for _ in 0..<N {
                 group.addTask { [client] in
                     let req = HTTPClientRequest(url: "http://localhost:\(port)/")
@@ -423,17 +417,17 @@ final class VeloxServeTests: XCTestCase {
             return results.sorted()
         }
 
-        XCTAssertEqual(N, responses.count)
-        XCTAssertEqual(Array(1...N), responses)
+        #expect(N == responses.count)
+        #expect(Array(1...N) == responses)
     }
 
-
+    @Test
     func testStreamingEcho() async throws {
         let size = 1024 * 128 // 128kb
 
         let server = Server(host: "localhost") { req, res in 
-            XCTAssertEqual(req.method, .post)
-            XCTAssertEqual(req.body.expectedContentLength, size)
+            #expect(req.method == .post)
+            #expect(req.body.expectedContentLength == size)
             
             for try await var chunk in req.body {
                 try await res.writeBodyPart(&chunk)
@@ -446,9 +440,8 @@ final class VeloxServeTests: XCTestCase {
         let serverTask = Task {
             try await server.run()
         }
-        defer { serverTask.cancel()}
+        defer { serverTask.cancel() } 
 
-        
         let chunkSize = 1024
         var sentBytes = 0
         var req = HTTPClientRequest(url: "http://localhost:\(localAddress.port!)/")
@@ -464,11 +457,11 @@ final class VeloxServeTests: XCTestCase {
         }
         req.method = .POST
         req.body = .stream(stream, length: .known(Int64(size)))
-        let response = try await self.client.execute(req, deadline: .now() + .seconds(2))
-        let body = try await response.body.collect(upTo: 2*size).readableBytesView
 
-        XCTAssertEqual(size, body.count)
-        
+        let response = try await self.client.execute(req, deadline: .now() + .seconds(2))
+        let body = try await response.body.collect(upTo: 2 * size).readableBytesView
+
+        #expect(size == body.count)
     }
 
 }
