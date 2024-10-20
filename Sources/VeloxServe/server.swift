@@ -171,26 +171,37 @@ public final class Server: Sendable {
             }
         }
 
-        let (waiters, runningState) = try self.state.withLockedValue { state in
+        enum ChannelReadyAction {
+            case resumeWaiters([CheckedContinuation<State.Running, Error>], State.Running)
+            case closeChannel(Channel)
+        }
+        
+        let readyAction : ChannelReadyAction = self.state.withLockedValue { state in
             switch state {
                 case .starting(waiters: let waiters):
                     var continuation: AsyncStream<Void>.Continuation!
                     let stream = AsyncStream<Void>() { continuation = $0 }
                     let runningState = State.Running(serverChannel: channel, quiescingHelper: quiescingHelper, logger: configuration.logger, handler: configuration.handler, shutdownSignal: (continuation, stream))
                     state = .running(runningState)
-                    return (waiters, runningState)
+                    return .resumeWaiters(waiters, runningState)
                 case .shutdown: // we got shutdown while starting up
-                    throw ServerError.shuttingDown
+                    return .closeChannel(channel.channel)
                 case .initialized, .running, .shuttingDown:
                     preconditionFailure("Invalid state while starting: \(state)")
             }
         }
 
-        for waiter in waiters {
-            waiter.resume(returning: runningState)
-        }
+        switch readyAction {
+            case .resumeWaiters(let waiters, let runningState):
+                for waiter in waiters {
+                    waiter.resume(returning: runningState)
+                }
 
-        return runningState
+                return runningState
+            case .closeChannel(let channel):
+                channel.close(promise: nil)
+                throw ServerError.shuttingDown
+        }
     }
 
     public var localAddress: SocketAddress? {

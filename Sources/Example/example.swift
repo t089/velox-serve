@@ -28,10 +28,13 @@ struct Example: AsyncParsableCommand {
     @Option
     var listen: ListenAddress
 
+    @MainActor
     func run() async throws {
         LoggingSystem.bootstrap(StreamLogHandler.standardOutput)
 
         let elg = MultiThreadedEventLoopGroup.singleton
+
+        //  NIOSingletons.unsafeTryInstallSingletonPosixEventLoopGroupAsConcurrencyGlobalExecutor()
 
         let logger: Logger = {
             var logger =  Logger(label: "main")
