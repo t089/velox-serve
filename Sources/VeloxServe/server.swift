@@ -53,7 +53,7 @@ public final class Server: Sendable {
         host: String,
         port: Int = 0,
         name: String? = nil,
-        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+        group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
         logger: Logger = NoopLogger,
         handler: @escaping AnyHandler.Handler
     ) {
@@ -71,7 +71,7 @@ public final class Server: Sendable {
         host: String,
         port: Int = 0,
         name: String? = nil,
-        group: EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+        group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
         logger: Logger = NoopLogger,
         handler: Handler
     ) {
