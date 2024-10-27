@@ -53,7 +53,7 @@ public final class Server: Sendable {
         host: String,
         port: Int = 0,
         name: String? = nil,
-        group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        group: EventLoopGroup = NIOSingletons.posixEventLoopGroup,
         logger: Logger = NoopLogger,
         handler: @escaping AnyHandler.Handler
     ) {
@@ -71,7 +71,7 @@ public final class Server: Sendable {
         host: String,
         port: Int = 0,
         name: String? = nil,
-        group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        group: EventLoopGroup = NIOSingletons.posixEventLoopGroup,
         logger: Logger = NoopLogger,
         handler: Handler
     ) {
