@@ -293,16 +293,7 @@ public final class Server: Sendable {
             guard case var .head(head) = part else {
                 throw HTTPError.unexpectedHTTPPart(part)
             }
-
-            var requestReader: RootRequestReader!
-            var responseWriter: RootResponseWriter!
-
             while true {
-                let trailers = channel.channel.eventLoop.makePromise(of: HTTPFields?.self)
-                defer {
-                    trailers.succeed(nil)
-                }
-
                 let body = RootReadableBody(
                         expectedContentLength: head.expectedContentLength,
                         _internal: inboundIterator,
@@ -314,32 +305,19 @@ public final class Server: Sendable {
                 logger[metadataKey: "req.path"] = .string(head.path ?? "/")
                 logger[metadataKey: "req.method"] = .string(head.method.rawValue)
                 
+                let requestReader = RootRequestReader(
+                        logger: logger,
+                        head: head,
+                        body: body)
                 
-                if requestReader == nil {
-                    requestReader = RootRequestReader(
-                        logger: logger,
-                        head: head,
-                        body: body)
-                } else {
-                    requestReader.reset(
-                        logger: logger,
-                        head: head,
-                        body: body)
-                }
                 requestReader.userInfo[EventLoopKey.self] = channel.channel.eventLoop
 
-                if responseWriter == nil {
-                    responseWriter = RootResponseWriter(
+                
+                let responseWriter = RootResponseWriter(
                         allocator: channel.channel.allocator,
                         isKeepAlive: head.isKeepAlive,
                         responsePartWriter: outbound,
                         head: httpResponse(request: head, status: .ok, headers: [:]))
-                } else {
-                    responseWriter.reset(
-                        responsePartWriter: outbound,
-                        head: httpResponse(request: head, status: .ok, headers: [:]),
-                        isKeepAlive: head.isKeepAlive)
-                }
 
                 try await running.handler.handle(requestReader, responseWriter)
                 
@@ -356,18 +334,16 @@ public final class Server: Sendable {
                     break
                 }
                 
-                
-                var part: HTTPRequestPart?
-                
-                part = try await inboundIterator.next()    
+                // errors here indicate that the connection died, we can safely ignore this and close the connection
+                let nextPart = try? await inboundIterator.next()    
 
-                guard let part else {
-                    // if nil, break out of the loop
+                guard let nextPart else {
+                    // if nil, break out of the loop (close the connection)
                     break
                 }
 
-                guard case .head(let newHead) = part else {
-                    throw HTTPError.unexpectedHTTPPart(part)
+                guard case .head(let newHead) = nextPart else {
+                    throw HTTPError.unexpectedHTTPPart(nextPart)
                 }
                 head = newHead
             }

@@ -71,13 +71,15 @@ final class RootResponseWriter : ResponseWriter {
         self.writeBuffer = allocator.buffer(capacity: 4096)
     }
 
-    func reset(responsePartWriter: NIOAsyncChannelOutboundWriter<HTTPResponsePart>, head: HTTPResponse, isKeepAlive: Bool) {   
+    /* func reset(responsePartWriter: NIOAsyncChannelOutboundWriter<HTTPResponsePart>, head: HTTPResponse, isKeepAlive: Bool) {   
         self.responsePartWriter = responsePartWriter
         self.status = head.status
         self.headers = head.headerFields
         self.isKeepAlive = isKeepAlive
         self.writeBuffer.clear(minimumCapacity: 4096)
-    }
+        self.isDone = false
+        self.headerWritten = false
+    } */
 
     private(set) var headerWritten: Bool = false
     private(set) var isDone: Bool = false

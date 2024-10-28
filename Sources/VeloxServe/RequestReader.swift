@@ -131,12 +131,12 @@ final class RootRequestReader: RequestReader {
         self._body = body
     }
     
-    func reset(logger: Logger, head: HTTPRequest, body: RootReadableBody) {
+    /* func reset(logger: Logger, head: HTTPRequest, body: RootReadableBody) {
         self.logger = logger
         self.request = head
         self._body = body
         self.userInfo = UserInfo()
-    }
+    } */
 }
 
 final class RootReadableBody: ReadableBody {
