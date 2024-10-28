@@ -294,6 +294,9 @@ public final class Server: Sendable {
                 throw HTTPError.unexpectedHTTPPart(part)
             }
 
+            var requestReader: RootRequestReader!
+            var responseWriter: RootResponseWriter!
+
             while true {
                 let trailers = channel.channel.eventLoop.makePromise(of: HTTPFields?.self)
                 defer {
@@ -311,17 +314,32 @@ public final class Server: Sendable {
                 logger[metadataKey: "req.path"] = .string(head.path ?? "/")
                 logger[metadataKey: "req.method"] = .string(head.method.rawValue)
                 
-                let requestReader = RootRequestReader(
-                    logger: logger,
-                    head: head,
-                    body: body)
+                
+                if requestReader == nil {
+                    requestReader = RootRequestReader(
+                        logger: logger,
+                        head: head,
+                        body: body)
+                } else {
+                    requestReader.reset(
+                        logger: logger,
+                        head: head,
+                        body: body)
+                }
                 requestReader.userInfo[EventLoopKey.self] = channel.channel.eventLoop
 
-                let responseWriter = RootResponseWriter(
-                    allocator: channel.channel.allocator,
-                    isKeepAlive: true,
-                    responsePartWriter: outbound,
-                    head: httpResponse(request: head, status: .ok, headers: [:]))
+                if responseWriter == nil {
+                    responseWriter = RootResponseWriter(
+                        allocator: channel.channel.allocator,
+                        isKeepAlive: head.isKeepAlive,
+                        responsePartWriter: outbound,
+                        head: httpResponse(request: head, status: .ok, headers: [:]))
+                } else {
+                    responseWriter.reset(
+                        responsePartWriter: outbound,
+                        head: httpResponse(request: head, status: .ok, headers: [:]),
+                        isKeepAlive: head.isKeepAlive)
+                }
 
                 try await running.handler.handle(requestReader, responseWriter)
                 
@@ -391,119 +409,6 @@ extension Server : Service {
     }
 }
 
-public struct ConnectionClosedError: Error {}
-
-
-extension HTTPRequest {
-    var expectedContentLength: Int? {
-        self.headerFields[.contentLength].flatMap(Int.init)
-    }
-}
-
-extension HTTPRequestHead {
-    var expects100Continue: Bool {
-        self.headers["Expect"].contains("100-continue")
-    }
-}
-
-internal class RootReadableBody: ReadableBody {
-    public typealias Element = ByteBuffer
-
-    public let expectedContentLength: Int?
-
-    @usableFromInline
-    var _trailers: HTTPFields?
-
-    public var trailers: HTTPFields? {
-        get async throws { 
-            if !self.wasRead {
-                for try await _ in self {}
-            }
-            return self._trailers
-        }
-    }
-
-    @usableFromInline
-    typealias InboundStream = NIOAsyncChannelInboundStream<HTTPRequestPart>
-
-    @usableFromInline
-    var _internal: InboundStream.AsyncIterator
-
-    @usableFromInline
-    var wasRead: Bool = false
-
-    @usableFromInline
-    var fireFirstRead : (() -> ())!
-
-    init(expectedContentLength: Int?, _internal: InboundStream.AsyncIterator, onFirstRead: @escaping () -> ()) {
-        self._internal = _internal
-        self.expectedContentLength = expectedContentLength
-        self.fireFirstRead = onFirstRead
-    }
-
-    public func makeAsyncIterator() -> AsyncIterator {
-        return .init(underlying: self)
-    }
-
-    public struct AsyncIterator: AsyncIteratorProtocol {
-        @usableFromInline
-        var underlying: RootReadableBody
-
-        @inlinable
-        public mutating func next() async throws -> ByteBuffer? {
-            do {
-                guard !self.underlying.wasRead else {
-                    return nil
-                }
-
-                if let fireFirstRead = self.underlying.fireFirstRead {
-                    fireFirstRead()
-                    self.underlying.fireFirstRead = nil
-                }
-                guard let next = try await underlying._internal.next() else {
-                    self.underlying.wasRead = true
-                    return nil
-                }
-
-                switch next {
-                    case .body(let buffer):
-                        return buffer
-                    case .end(let trailers):
-                        self.underlying._trailers = trailers
-                        self.underlying.wasRead = true
-                        return nil
-                    default:
-                        self.underlying.wasRead = true
-                        throw Server.HTTPError.unexpectedHTTPPart(next)
-                }
-            } catch {
-                throw error
-            }
-        }
-    }
-
-}
-
-public struct TooManyBytesError: Error {
-    public init() {}
-}
-
-extension ReadableBody {
-    @inlinable public func collect(upTo maxBytes: Int) async throws -> ByteBuffer {
-        if let contentLength = self.expectedContentLength {
-            if contentLength > maxBytes {
-                throw TooManyBytesError()
-            }
-        }
-
-        /// calling collect function within here in order to ensure the correct nested type
-        func collect<Body: AsyncSequence>(_ body: Body, maxBytes: Int) async throws -> ByteBuffer
-        where Body.Element == ByteBuffer {
-            try await body.collect(upTo: maxBytes)
-        }
-        return try await collect(self, maxBytes: maxBytes)
-    }
-}
 
 extension HTTPRequest {
     var isKeepAlive: Bool {
@@ -511,7 +416,7 @@ extension HTTPRequest {
     }
 }
 
-func httpResponse(
+fileprivate func httpResponse(
     request: HTTPRequest,
     status: HTTPResponse.Status,
     headers: HTTPFields
@@ -535,259 +440,10 @@ func httpResponse(
     return response
 }
 
-public protocol ReadableBody : AsyncSequence where Element == ByteBuffer {
-    var expectedContentLength: Int? { get }
-    var trailers: HTTPFields? { get async throws }
-}
-
-public protocol RequestReader : AnyObject {
-    var logger: Logger { get set }
-    var request: HTTPRequest { get}
-    var body: AnyReadableBody { get }
-    var userInfo: UserInfo { get set }
-}
-
-extension RequestReader {
-    public var method: HTTPRequest.Method { self.request.method }
-    public var path: String { self.request.path! }
-    public var headers: HTTPFields { self.request.headerFields }
-    public var trailers: HTTPFields? { 
-        get async throws {
-            try await self.body.trailers
-        }
-    }
-}
 
 
-public enum EventLoopKey: UserInfoKey {
-    public typealias Value = EventLoop
-}
-
-class RootRequestReader: RequestReader {
-    var logger: Logger
-    let request: HTTPRequest
-    private let _body: RootReadableBody
-    
-    var body: AnyReadableBody {
-        AnyReadableBody(self._body)
-    }
-    
-
-    var userInfo: UserInfo = UserInfo()
 
 
-    init(
-        logger: Logger,
-        head: HTTPRequest,
-        body: RootReadableBody
-    ) {
-        self.logger = logger
-        self.request = head
-        self._body = body
-    }
-    
-}
-
-@usableFromInline
-enum ResponsePart: Sendable {
-    case head(HTTPResponseHead)
-    case bodyPart(ByteBuffer)
-    case end(HTTPHeaders?)
-}
-
-public protocol ResponseWriter: AnyObject {
-
-    var status: HTTPResponse.Status { get set }
-    var headers: HTTPFields { get set }
-    var trailers: HTTPFields? { get set }
-
-    func writeHead() async throws
-    func writeBodyPart(_ data: inout ByteBuffer) async throws
-    func end() async throws
-}
-
-extension ResponseWriter {
-    public func writeBodyPart(_ string: String) async throws {
-        try await self.writeBodyPart(string.utf8)
-    }
-
-    public func writeBodyPart(_ string: Substring) async throws {
-        try await self.writeBodyPart(string.utf8)
-    }
-
-    @inlinable
-    public func writeBodyPart(_ bytes: some Sequence<UInt8>) async throws {
-        var buffer = ByteBuffer(bytes: bytes)
-        try await self.writeBodyPart(&buffer)
-    }
-
-    public func plainText(_ text: String) async throws {
-        self.headers[.contentType] = "text/plain"
-        let data = text.utf8
-        self.headers[.contentLength] = "\(data.count)"
-        try await self.writeBodyPart(data)
-    }
-}
-
-
-internal class RootResponseWriter : ResponseWriter {
-
-
-    let isKeepAlive: Bool
-
-    let responsePartWriter: NIOAsyncChannelOutboundWriter<HTTPResponsePart>
-
-    var status: HTTPResponse.Status
-    
-    var headers: HTTPFields
-
-    var trailers: HTTPFields?
-
-    init(
-        allocator: ByteBufferAllocator,
-        isKeepAlive: Bool,
-        responsePartWriter: NIOAsyncChannelOutboundWriter<HTTPResponsePart>,
-        head: HTTPResponse
-    ) {
-        self.isKeepAlive = isKeepAlive
-        self.responsePartWriter = responsePartWriter
-        self.status = head.status
-        self.headers = head.headerFields
-        self.writeBuffer = allocator.buffer(capacity: 4096)
-    }
-
-    private(set) var headerWritten: Bool = false
-    private(set) var isDone: Bool = false
-
-    private var head: HTTPResponse {
-        HTTPResponse(status: self.status, headerFields: self.headers)
-    }
-
-    private
-    var writeBuffer: ByteBuffer
-
-    func writeHead() async throws {
-        precondition(self.headerWritten == false, "Header can only be written once.")
-        
-        var head = self.head
-        if head.status.code / 100 == 1 { // remove connection header for informational responses
-            head.headerFields[.connection] = nil
-        }
-        
-        try await self.responsePartWriter.write(.head(head))
-        if self.head.status.code / 100 != 1 {
-            self.headerWritten.toggle()
-        }
-    }
-
-    private func writeHeadIfNecessary() async throws {
-        guard self.headerWritten == false else {
-            return
-        }
-        precondition(self.head.status.code / 100 != 1, "Head must not be 1xx")
-        try await self.writeHead()
-    }
-
-     @inlinable
-    func writeBodyPart(_ data: some Sequence<UInt8>) async throws {
-        self.writeBuffer.writeBytes(data)
-        try await self.flushIfNecessary()
-    }
-
-    @inlinable
-    public func writeBodyPart(_ data: inout ByteBuffer) async throws {
-        if data.readableBytes > 0 {
-            self.writeBuffer.writeBuffer(&data)
-            try await self.flushIfNecessary()
-        }
-    }
-
-    @inlinable
-    func flushIfNecessary() async throws {
-        try await self.writeHeadIfNecessary()
-        let readableBytes = self.writeBuffer.readableBytes
-        if readableBytes >= 0 {
-            try await responsePartWriter.write(
-                .body(self.writeBuffer.readSlice(length: readableBytes)!))
-        }
-    }
-
-    @inlinable
-    public func flush() async throws {
-        try await self.writeHeadIfNecessary()
-        if self.writeBuffer.readableBytes > 0 {
-            try await responsePartWriter.write(
-                .body(self.writeBuffer.readSlice(length: self.writeBuffer.readableBytes)!))
-        }
-    }
-
-    public func end(_ trailers: HTTPFields?) async throws {
-        precondition(self.isDone == false)
-        self.isDone.toggle()
-        try await self.flush()
-        self.trailers = trailers
-        try await responsePartWriter.write(.end(self.trailers))
-    }
-
-    public func end() async throws {
-        precondition(self.isDone == false)
-        self.isDone.toggle()
-        try await self.flush()
-        try await responsePartWriter.write(.end(self.trailers))
-    }
-
-    public func plainText(_ text: String) async throws {
-        self.headers[.contentType] = "text/plain"
-        let data = text.utf8
-        self.headers[.contentLength] = "\(data.count)"
-        try await self.writeBodyPart(data)
-    }
-}
 
 
 public let NoopLogger = Logger(label: "noop", factory: SwiftLogNoOpLogHandler.init)
-
-
-public struct AnyReadableBody: ReadableBody {
-    public typealias Element = ByteBuffer
-
-    private let _underlyingNextFactory: () -> () async throws -> ByteBuffer?
-    private let _underlyingTrailers: () async throws -> HTTPFields?
-
-    public init<Body: ReadableBody>(_ body: Body)
-    where Body.Element == ByteBuffer {
-        self._underlyingNextFactory = { 
-            var iterator = body.makeAsyncIterator()
-            return { try await iterator.next() }
-         }
-        self._underlyingTrailers = { try await body.trailers }
-        self.expectedContentLength = body.expectedContentLength
-    }
-
-    public let expectedContentLength: Int?
-
-    public var trailers: HTTPFields? {
-        get async throws {
-            try await self._underlyingTrailers()
-        }
-    }
-
-    public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(iterator: self._underlyingNextFactory())
-    }
-
-    
-    public struct AsyncIterator: AsyncIteratorProtocol {
-        @usableFromInline
-        var _iterator: () async throws -> Element?
-
-        init(iterator: @escaping () async throws -> Element?) {
-            self._iterator = iterator
-        }
-
-        @inlinable
-        public mutating func next() async throws -> Element? {
-            try await self._iterator()
-        }
-    }
-}
