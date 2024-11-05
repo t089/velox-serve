@@ -7,9 +7,14 @@ import NIOHTTPTypes
 public protocol RequestReader : AnyObject {
     var logger: Logger { get set }
     var request: HTTPRequest { get}
+    var queryItems: QueryItems { get }
     var body: AnyReadableBody { get }
     var userInfo: UserInfo { get set }
+    
 }
+
+
+
 
 extension RequestReader {
     public var method: HTTPRequest.Method { self.request.method }
@@ -117,8 +122,13 @@ final class RootRequestReader: RequestReader {
         AnyReadableBody(self._body)
     }
     
+    lazy var queryItems: QueryItems = {
+        let endOfPath = self.request.path!.firstIndex(of: "?") ?? self.request.path!.endIndex
+        return QueryItems(parsing: self.request.path![endOfPath...].dropFirst())
+    }()
 
     var userInfo: UserInfo = UserInfo()
+
 
 
     init(

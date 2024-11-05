@@ -101,6 +101,48 @@ final class VeloxServeTests {
     }
 
     @Test
+    func testQueryParsing() async throws {
+        let result = try await withServer { req, res in 
+            #expect(req.queryItems[first: "name"] == "value")
+            #expect(req.queryItems.name == "value")
+            #expect(req.queryItems[values: "name"] == ["value", "second value"])
+            #expect(req.queryItems[first: "test"] == "München")
+            #expect(req.queryItems[last: "name"] == "second value")
+            try await res.plainText("OK\r\n")
+        } client: { inbound, outbound in 
+            try await outbound.write(.head(HTTPRequest(method: .get, scheme: nil, authority: nil, path: "/?name=value&test=M%C3%BCnchen&name=second+value")))
+            try await outbound.write(.end(nil))
+
+            let response = try await inbound.readFullResponse()
+            return response
+        }
+        #expect(result.0.status == .ok)
+        #expect(String(decoding: result.1.readableBytesView, as: UTF8.self) == "OK\r\n")
+    }
+
+    @Test
+    func testEmptyQueryParsing() async throws {
+        let result = try await withServer { req, res in 
+            #expect(req.queryItems[first: "name"] == nil)
+            #expect(req.queryItems.name == nil)
+            #expect(req.queryItems[values: "name"] == [])
+            #expect(req.queryItems[first: "last"] == nil)
+            try await res.plainText("OK\r\n")
+        } client: { inbound, outbound in 
+            try await outbound.write(.head(HTTPRequest(method: .get, scheme: nil, authority: nil, path: "/?")))
+            try await outbound.write(.end(nil))
+
+            try await outbound.write(.head(HTTPRequest(method: .get, scheme: nil, authority: nil, path: "/")))
+            try await outbound.write(.end(nil))
+
+            let response = try await inbound.readFullResponse()
+            return response
+        }
+        #expect(result.0.status == .ok)
+        #expect(String(decoding: result.1.readableBytesView, as: UTF8.self) == "OK\r\n")
+    }
+
+    @Test
     func testInterceptingHandler() async throws {
         final class Wrapper: RequestReader {
             let wrapped: RequestReader
@@ -114,6 +156,8 @@ final class VeloxServeTests {
                 set { wrapped.logger = newValue }
             }
             var request: HTTPRequest { wrapped.request }
+            var queryItems: QueryItems { wrapped.queryItems }
+
             let _body: Body
             var body: AnyReadableBody { AnyReadableBody(_body) }
             var userInfo: UserInfo { 
