@@ -10,6 +10,23 @@ import HTTPTypes
 import ServiceLifecycle
 import NIOConcurrencyHelpers
 
+class ServerDebugHandler: ChannelDuplexHandler {
+    typealias OutboundIn = HTTPResponsePart
+    typealias InboundIn = HTTPRequestPart
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let part = unwrapInboundIn(data)
+        print("ServerDebugHandler <<: \(part)")
+        context.fireChannelRead(data)
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let part = unwrapOutboundIn(data)
+        print("ServerDebugHandler >>: \(part)")
+        context.write(data, promise: promise)
+    }
+}
+
 public final class Server: Sendable {
     public enum HTTPError : Error {
         case unexpectedHTTPPart(HTTPRequestPart)
@@ -164,6 +181,7 @@ public final class Server: Sendable {
                 try channel.pipeline.syncOperations.addHandler(AutomaticContinueHandler())
                 try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: configuration.name))
                 try channel.pipeline.syncOperations.addHandler(HTTP1ToHTTPServerCodec(secure: false))
+               // try channel.pipeline.syncOperations.addHandler(ServerDebugHandler())
                 
                 return try NIOAsyncChannel(
                     wrappingChannelSynchronously: channel,

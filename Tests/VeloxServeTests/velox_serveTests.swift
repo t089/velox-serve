@@ -3,6 +3,7 @@ import VeloxServe
 import AsyncHTTPClient
 import NIO
 import HTTPTypes
+import NIOHTTP1
 import NIOHTTPTypes
 import NIOHTTPTypesHTTP1
 import Logging
@@ -508,10 +509,156 @@ final class VeloxServeTests {
         #expect(size == body.count)
     }
 
+    @Test
+    func testTrieRouter() async throws {
+        var router = Router()
+        router.get("/", handler: AnyHandler { req, res in 
+            #expect(req.route == "/")
+            try await res.plainText("OK")
+        })
+
+        router.get("/user/{id}", handler: AnyHandler { req, res in 
+            #expect(req.route == "/user/{id}")
+            try await res.plainText("User \(req.routeParameters["id"]!)")
+        })
+
+        router.post("/user", handler: AnyHandler { req, res in 
+            #expect(req.route == "/user")
+            try await res.plainText("User created")
+        })
+
+        router.get("/user/{id}/posts", handler: AnyHandler { req, res in 
+            #expect(req.route == "/user/{id}/posts")
+            try await res.plainText("User \(req.routeParameters["id"]!) posts")
+        })
+
+        router.get("/user/{id}/posts/{postId}", handler: AnyHandler { req, res in 
+            #expect(req.route == "/user/{id}/posts/{postId}")
+            try await res.plainText("User \(req.routeParameters["id"]!) post \(req.routeParameters["postId"]!)")
+        })
+
+        router.get("/user/{id}/posts/{postId}/comments", handler: AnyHandler { req, res in 
+            #expect(req.route == "/user/{id}/posts/{postId}/comments")
+            try await res.plainText("User \(req.routeParameters["id"]!) post \(req.routeParameters["postId"]!) comments")
+        })
+
+        try await withServer(handler: router.handle) { inbound, outbound in 
+
+            var inboundIterator = inbound.makeAsyncIterator()
+            try await outbound.get("/user/123")
+            var response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("User 123" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+
+            try await outbound.get("/user/123/posts")
+            response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("User 123 posts" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+
+            try await outbound.get("/")
+            response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("OK" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+
+            try await outbound.post("/user", body: ByteBuffer(string: "name=John&age=30"))
+            response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("User created" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+
+            try await outbound.get("/user/123/posts/abc")
+            response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("User 123 post abc" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+
+            try await outbound.get("/user/123/posts/abc/comments")
+            response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("User 123 post abc comments" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+
+            
+        }
+
+    }
+
+    @Test
+    func testMethodNotAllowed() async throws {
+        var router = Router()
+        router.get("/user/{id}/posts", handler: AnyHandler { req, res in 
+            try await res.plainText("OK: /users/\(req.routeParameters["id"] ?? "??")/posts")
+        })
+
+        try await withServer(handler: router.handle) { inbound, outbound in 
+            var inboundIterator = inbound.makeAsyncIterator()
+            try await outbound.head("/user/123/posts")
+            var response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .methodNotAllowed)
+            let body = String(decoding: response.1.readableBytesView, as: UTF8.self)
+            #expect("" == body) // bodies for head requests are ignored
+
+
+            try await outbound.get("/user/123/posts")
+            response = try await inboundIterator.readFullResponse()
+            #expect(response.0.status == .ok)
+            #expect("OK: /users/123/posts" == String(decoding: response.1.readableBytesView, as: UTF8.self))
+        }
+    }
+
+
+
 }
 
 enum HTTPError: Error {
     case unexpectedHTTPPart(HTTPResponsePart?)
+}
+
+class DebugHandler: ChannelDuplexHandler {
+    typealias OutboundIn = IOData
+    typealias InboundIn = IOData
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let part = unwrapInboundIn(data)
+
+        switch part {
+        case .byteBuffer(let buffer):
+            print("DebugHandler <<: \(String(decoding: buffer.readableBytesView, as: UTF8.self))")
+        default:
+            print("DebugHandler <<: \(part)")
+        }
+
+        context.fireChannelRead(data)
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let part = unwrapOutboundIn(data)
+        switch part {
+        case .byteBuffer(let buffer):
+            print("DebugHandler >>: \(String(decoding: buffer.readableBytesView, as: UTF8.self))")
+        default:
+            print("DebugHandler >>: \(part)")
+        }
+        context.write(data, promise: promise)
+    }
+}
+
+class DebugClientHandler: ChannelDuplexHandler {
+    typealias OutboundIn = HTTPClientRequestPart
+    typealias InboundIn = HTTPClientResponsePart
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let part = unwrapInboundIn(data)
+
+        
+        print("DebugClientHandler <<: \(part)")
+        
+
+        context.fireChannelRead(data)
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let part = unwrapOutboundIn(data)
+        print("DebugClientHandler >>: \(part)")
+        context.write(data, promise: promise)
+    }
 }
 
 enum SimpleClient {
@@ -522,7 +669,10 @@ enum SimpleClient {
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEPORT), value: 1)
             .connect(host: host, port: port) { channel in
-                channel.pipeline.addHTTPClientHandlers().flatMap {
+                channel.pipeline.addHTTPClientHandlers()
+                /*.flatMap {
+                    channel.pipeline.addHandler(DebugClientHandler())
+                }*/.flatMap {
                     channel.pipeline.addHandler(HTTP1ToHTTPClientCodec())
                 }.flatMapThrowing {
                     try NIOAsyncChannel(
@@ -541,9 +691,16 @@ enum SimpleClient {
 
 extension NIOAsyncChannelInboundStream<HTTPResponsePart> {
     func readFullResponse() async throws -> (HTTPResponse, ByteBuffer, HTTPFields?) {
+        var it = self.makeAsyncIterator()
+        return try await it.readFullResponse()
+    }
+}
+
+extension NIOAsyncChannelInboundStream<HTTPResponsePart>.AsyncIterator {
+    mutating func readFullResponse() async throws -> (HTTPResponse, ByteBuffer, HTTPFields?) {
         var response: HTTPResponse?
         var body = ByteBuffer()
-        for try await part in self {
+        while let part = try await self.next() {
             switch part {
             case .head(let head):
                 response = head
@@ -557,5 +714,23 @@ extension NIOAsyncChannelInboundStream<HTTPResponsePart> {
             }
         }
         throw HTTPError.unexpectedHTTPPart(nil)
+    }
+}
+
+extension NIOAsyncChannelOutboundWriter<HTTPRequestPart> {
+    func get(_ path: String) async throws {
+        try await self.write(.head(HTTPRequest(method: .get, scheme: nil, authority: nil, path: path)))
+        try await self.write(.end(nil))
+    }
+
+    func post(_ path: String, body: ByteBuffer) async throws {
+        try await self.write(.head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: path)))
+        try await self.write(.body(body))
+        try await self.write(.end(nil))
+    }
+
+    func head(_ path: String) async throws {
+        try await self.write(.head(HTTPRequest(method: .head, scheme: nil, authority: nil, path: path)))
+        try await self.write(.end(nil))
     }
 }

@@ -42,9 +42,27 @@ struct Example: AsyncParsableCommand {
             return logger
         }()
 
+        var router = Router()
+        router.get("/", handler: AnyHandler { req, res in
+            try await res.plainText("Hello, world!\r\n")
+        })
+
+        router.post("/upload", handler: AnyHandler(self.upload))
+
+        router.get("/chunked", handler: AnyHandler(self.chunked))
+
+        router.post("/echo", handler: AnyHandler(self.echo))
+        router.get("/echo", handler: AnyHandler(self.echo))
+        router.put("/echo", handler: AnyHandler(self.echo))
+        router.delete("/echo", handler: AnyHandler(self.echo))
+
+        router.get("/random", handler: AnyHandler(self.random))
+
+
+
         let server = Server(
             host: self.listen.host, port: self.listen.port, name: "Example", group: elg, logger: logger,
-            handler: AnyHandler(loggingServe(logger, serve: self.serve)).instrumented())
+            handler: AnyHandler(loggingServe(logger, serve: router.handle)).instrumented())
         
         let group = ServiceGroup(
             services: [ server ],
@@ -52,30 +70,6 @@ struct Example: AsyncParsableCommand {
             cancellationSignals: [ ],
             logger: logger)
         try await group.run()
-    }
-
-    @Sendable func serve(req: RequestReader, res: any ResponseWriter) async throws {
-        switch req.path {
-            case "/": 
-                req.route = "/"
-                try await res.plainText("Hello, world!\r\n")
-            case "/upload": 
-                req.route = "/upload"
-                try await upload(req: req, res: res)
-            case let path where path.hasPrefix("/chunked"): 
-                req.route = "/chunked"
-                try await chunked(req: req, res: res)
-            case "/echo":
-                req.route = "/echo"
-                try await echo(req: req, res: res)
-            case "/random":
-                req.route = "/random"
-                try await random(req: req, res: res)
-
-            default: 
-                res.status = .notFound
-                try await res.plainText("ERROR: Not found")
-        }
     }
 
     func upload(req: RequestReader, res: any ResponseWriter) async throws {
@@ -189,10 +183,10 @@ let randomStaticBuffer : UnsafeSendableBox<UnsafeMutableBufferPointer<UInt8>> = 
             try await serve(req, res)
             let duration = start.distance(to: .now())
             logger.info(
-                "\(req.method) \(req.path) - \(res.status.code) - \(duration.millis.formatted(3))ms")
+                "\(req.method) \(req.route ?? req.path) - \(res.status.code) - \(duration.millis.formatted(3))ms")
         } catch {
             let duration = start.distance(to: .now())
-            logger.error("\(req.method) \(req.path) - ERROR - \(duration): \(error)")
+            logger.error("\(req.method) \(req.route ?? req.path) - ERROR - \(duration): \(error)")
             throw error
         }
     }
