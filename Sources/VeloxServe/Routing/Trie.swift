@@ -219,6 +219,10 @@ public struct Router: Handler {
         }
     }
 
+    public mutating func register(method: HTTPRequest.Method, path: String, handler: Handler) {
+        trie.insert(path: .init(path: path), method: method, handler: handler.withRoute(path))
+    }
+
     public mutating func get(_ path: String, handler: Handler) {
         trie.insert(path: .init(path: path), method: .get, handler: handler.withRoute(path))
     }
