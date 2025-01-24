@@ -160,6 +160,14 @@ struct UnsafeSendableBox<Value> : @unchecked Sendable {
     let value: Value
 }
 
+#if os(Linux)
+extension DispatchTime {
+    func distance(to other: DispatchTime) -> DispatchTimeInterval {
+        return .nanoseconds(Int(other.uptimeNanoseconds) - Int(self.uptimeNanoseconds))
+    }
+}
+#endif
+
 let randomStaticBuffer : UnsafeSendableBox<UnsafeMutableBufferPointer<UInt8>> = {
     let count = 1024 * 1024 * 10
     let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: count)
