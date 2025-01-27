@@ -276,9 +276,9 @@ public struct PathParameterInvalidError: Error, CustomStringConvertible {
 }
 
 public struct PathParatmeters: Hashable, Sendable, CustomStringConvertible {
-    private var params: [String: Substring]
+    public var params: [String: Substring]
 
-    init(_ params: [String: Substring]) {
+    public init(_ params: [String: Substring]) {
         self.params = params
     }
 
