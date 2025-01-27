@@ -80,10 +80,10 @@ struct Trie<Value> {
         nodes[currentIndex].methodHandlers[method] = (paramNames, handler)
     }
 
-    func lookup(path: [Substring], method: HTTPRequest.Method) throws(LookupError) -> (Value, [String: String]) {
+    func lookup(path: [Substring], method: HTTPRequest.Method) throws(LookupError) -> (Value, [String: Substring]) {
         var currentIndex = nodes.startIndex
-        var paramValues: [String] = []
-        var params = [String: String]()
+        var paramValues: [Substring] = []
+        var params = [String: Substring]()
 
         for i in path.indices {
             let component = path[i]
@@ -98,18 +98,18 @@ struct Trie<Value> {
                 currentIndex = nextIndex
             } else if let (prefix, nextIndex) = node.prefixParameterChildren.last(where: { component.starts(with: $0.prefix) }) {
                 currentIndex = nextIndex
-                paramValues.append(String(component.dropFirst(prefix.count)))
+                paramValues.append(component.dropFirst(prefix.count))
             } else if let (suffix, nextIndex) = node.suffixParameterChild.last(where: { component.reversed().starts(with: $0.suffix.reversed()) }) {
                 currentIndex = nextIndex
-                paramValues.append(String(component.dropLast(suffix.count)))
+                paramValues.append(component.dropLast(suffix.count))
             } else if let nextIndex = node.parameterChild {
                 currentIndex = nextIndex
-                paramValues.append(String(component))
+                paramValues.append(component)
             } else if let (catchAllName, nextIndex) = node.catchAllChild {
                 currentIndex = nextIndex
                 let remainingPath = path[i...]
                 if let catchAllName {
-                    params[String(catchAllName)] = String(remainingPath.joined(separator: "/"))
+                    params[String(catchAllName)] = Substring(remainingPath.joined(separator: "/"))
                 }
                 // catch all completes the lookup
                 break
@@ -203,8 +203,14 @@ public struct Router: Handler {
     public func handle(_ request: any RequestReader, _ response: any ResponseWriter) async throws {
         do {
             let handler = try trie.lookup(path: request.path.split(separator: "/", omittingEmptySubsequences: true), method: request.method)
-            request.userInfo[RouteParams.self] = handler.1
+            request.userInfo[PathParatmeters.self] = PathParatmeters(handler.1)
             try await handler.0.handle(request, response)
+        } catch let error as PathParameterMissingError {
+            response.status = .badRequest
+            try await response.plainText("\(error)")
+        } catch let error as PathParameterInvalidError {
+            response.status = .badRequest
+            try await response.plainText("\(error)")
         } catch LookupError.notFound {
             response.status = .notFound
             try await response.writeBodyPart("Not found: \(request.path)")
@@ -249,17 +255,67 @@ extension Handler {
     }
 }
 
-enum RouteParams: UserInfoKey {
+enum PathParameters: UserInfoKey {
     typealias Value = [String: String]
 }
 
-extension RequestReader {
-    public var routeParameters : [String: String] {
-        get {
-            return self.userInfo[RouteParams.self] ?? [:]
+public struct PathParameterMissingError: Error, CustomStringConvertible {
+    public let key: String
+    public var description: String {
+        return "Missing path parameter: \(key)"
+    }
+}
+
+public struct PathParameterInvalidError: Error, CustomStringConvertible {
+    public let key: String
+    public let value: Substring
+    public let expectedType: Any.Type
+    public var description: String {
+        return "Invalid path parameter: \(key) = \(value), expected type: \(expectedType)"
+    }
+}
+
+public struct PathParatmeters: Hashable, Sendable, CustomStringConvertible {
+    private var params: [String: Substring]
+
+    init(_ params: [String: Substring]) {
+        self.params = params
+    }
+
+    public subscript(key: String) -> Substring? {
+        return params[key]
+    }
+
+    public subscript<T: LosslessStringConvertible>(required key: String, as type: T.Type = T.self) -> T {
+        get throws {
+            guard let value = params[key] else {
+                throw PathParameterMissingError(key: key)
+            }
+
+            guard let converted = T(String(value)) else {
+                throw PathParameterInvalidError(key: key, value: value, expectedType: type)
+            }
+
+            return converted
         }
-        set {
-            self.userInfo[RouteParams.self] = newValue
+    }
+
+    public var description: String {
+        return self.params.description
+    }
+}
+
+extension PathParatmeters: UserInfoKey {
+    public typealias Value = Self
+}
+
+extension RequestReader {
+    public var pathParameters : PathParatmeters {
+        get {
+            return self.userInfo[PathParatmeters.self] ?? PathParatmeters([:])
+        }
+       set {
+            self.userInfo[PathParatmeters.self] = newValue
         }
     }
 }

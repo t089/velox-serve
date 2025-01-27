@@ -519,7 +519,7 @@ final class VeloxServeTests {
 
         router.get("/user/{id}", handler: AnyHandler { req, res in 
             #expect(req.route == "/user/{id}")
-            try await res.plainText("User \(req.routeParameters["id"]!)")
+            try await res.plainText("User \(req.pathParameters["id"]!)")
         })
 
         router.post("/user", handler: AnyHandler { req, res in 
@@ -529,17 +529,17 @@ final class VeloxServeTests {
 
         router.get("/user/{id}/posts", handler: AnyHandler { req, res in 
             #expect(req.route == "/user/{id}/posts")
-            try await res.plainText("User \(req.routeParameters["id"]!) posts")
+            try await res.plainText("User \(req.pathParameters["id"]!) posts")
         })
 
         router.get("/user/{id}/posts/{postId}", handler: AnyHandler { req, res in 
             #expect(req.route == "/user/{id}/posts/{postId}")
-            try await res.plainText("User \(req.routeParameters["id"]!) post \(req.routeParameters["postId"]!)")
+            try await res.plainText("User \(req.pathParameters["id"]!) post \(req.pathParameters["postId"]!)")
         })
 
         router.get("/user/{id}/posts/{postId}/comments", handler: AnyHandler { req, res in 
             #expect(req.route == "/user/{id}/posts/{postId}/comments")
-            try await res.plainText("User \(req.routeParameters["id"]!) post \(req.routeParameters["postId"]!) comments")
+            try await res.plainText("User \(req.pathParameters["id"]!) post \(req.pathParameters["postId"]!) comments")
         })
 
         try await withServer(handler: router.handle) { inbound, outbound in 
@@ -584,7 +584,7 @@ final class VeloxServeTests {
     func testMethodNotAllowed() async throws {
         var router = Router()
         router.get("/user/{id}/posts", handler: AnyHandler { req, res in 
-            try await res.plainText("OK: /users/\(req.routeParameters["id"] ?? "??")/posts")
+            try await res.plainText("OK: /users/\(req.pathParameters[required: "id", as: Int.self])/posts")
         })
 
         try await withServer(handler: router.handle) { inbound, outbound in 
