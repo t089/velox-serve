@@ -10,7 +10,7 @@ public protocol RequestReader : AnyObject {
     var queryItems: QueryItems { get }
     var body: AnyReadableBody { get }
     var userInfo: UserInfo { get set }
-    
+    var executor: any (TaskExecutor & SerialExecutor) { get }
 }
 
 
@@ -117,6 +117,8 @@ final class RootRequestReader: RequestReader {
     var logger: Logger
     private(set) var request: HTTPRequest
     private var _body: RootReadableBody
+
+    let executor: any (TaskExecutor & SerialExecutor)
     
     var body: AnyReadableBody {
         AnyReadableBody(self._body)
@@ -134,11 +136,13 @@ final class RootRequestReader: RequestReader {
     init(
         logger: Logger,
         head: HTTPRequest,
-        body: RootReadableBody
+        body: RootReadableBody,
+        executor: any (TaskExecutor & SerialExecutor)
     ) {
         self.logger = logger
         self.request = head
         self._body = body
+        self.executor = executor
     }
     
     /* func reset(logger: Logger, head: HTTPRequest, body: RootReadableBody) {

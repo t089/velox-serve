@@ -9,20 +9,29 @@ import NIOHTTPTypesHTTP1
 import HTTPTypes
 import ServiceLifecycle
 import NIOConcurrencyHelpers
+import Foundation
 
 class ServerDebugHandler: ChannelDuplexHandler {
-    typealias OutboundIn = HTTPResponsePart
-    typealias InboundIn = HTTPRequestPart
+    typealias OutboundIn = IOData
+    typealias InboundIn = IOData
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
-        print("ServerDebugHandler <<: \(part)")
+        switch part {
+            case .byteBuffer(let buffer):
+                print("ServerDebugHandler <<: \(String(decoding: buffer.readableBytesView, as: UTF8.self))")
+            default: break
+        }
         context.fireChannelRead(data)
     }
 
     func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         let part = unwrapOutboundIn(data)
-        print("ServerDebugHandler >>: \(part)")
+        switch part {
+            case .byteBuffer(let buffer):
+                print("ServerDebugHandler >>: \(String(decoding: buffer.readableBytesView, as: UTF8.self))")
+            default: break
+        }
         context.write(data, promise: promise)
     }
 }
@@ -177,11 +186,13 @@ public final class Server: Sendable {
                     withServerUpgrade: nil, 
                     withErrorHandling: true,
                     withOutboundHeaderValidation: false)
+                
                 try channel.pipeline.syncOperations.addHandler(ChannelQuiescingHandler(logger: configuration.logger))
                 try channel.pipeline.syncOperations.addHandler(AutomaticContinueHandler())
                 try channel.pipeline.syncOperations.addHandler(OutboundHeaderHandler(clock: UTCClock(), serverName: configuration.name))
+                
                 try channel.pipeline.syncOperations.addHandler(HTTP1ToHTTPServerCodec(secure: false))
-               // try channel.pipeline.syncOperations.addHandler(ServerDebugHandler())
+                
                 
                 return try NIOAsyncChannel(
                     wrappingChannelSynchronously: channel,
@@ -236,23 +247,27 @@ public final class Server: Sendable {
         try await withGracefulShutdownHandler {
             let running = try await self._start()
             let serverChannel = running.serverChannel
+            let serverTaskExecutor = EventLoopTaskExecutor(eventLoop: serverChannel.channel.eventLoop)
             let logger = running.logger
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
                     for try await  _ in running.shutdownSignal.1 { }
                 }
 
-                group.addTask {
+                group.addTask(executorPreference: serverTaskExecutor) {
                     try await withThrowingDiscardingTaskGroup { group in
                         try await serverChannel.executeThenClose { inbound in
+                            serverChannel.channel.eventLoop.assertInEventLoop()
                             logger.info("Listening for connections on \(serverChannel.channel.localAddress!) ...")
                             defer {
                                 logger.info("Stopped listening for new connections.")
                             }
                             for try await channel in inbound.cancelOnGracefulShutdown() {
-                                group.addTask { [logger] in 
+                                let executor = EventLoopTaskExecutor(eventLoop: channel.channel.eventLoop)
+                                group.addTask(executorPreference: executor) { [logger] in 
+                                    channel.channel.eventLoop.assertInEventLoop()
                                     do { 
-                                        try await self.handle(channel: channel, running: running)
+                                        try await self.handle(channel: channel, running: running, on: executor)
                                     } catch {
                                         logger.trace("Error handling connection: \(error)")
                                     }
@@ -303,7 +318,7 @@ public final class Server: Sendable {
     }
 
     private
-    func handle(channel: NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>, running: State.Running) async throws {
+    func handle(channel: NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>, running: State.Running, on executor: EventLoopTaskExecutor) async throws {
         try await channel.executeThenClose { inbound, outbound in
             var inboundIterator = inbound.makeAsyncIterator()
             
@@ -326,7 +341,8 @@ public final class Server: Sendable {
                 let requestReader = RootRequestReader(
                         logger: logger,
                         head: head,
-                        body: body)
+                        body: body,
+                        executor: executor)
                 
                 requestReader.userInfo[EventLoopKey.self] = channel.channel.eventLoop
 
@@ -441,3 +457,30 @@ fileprivate func httpResponse(
 
 
 public let NoopLogger = Logger(label: "noop", factory: SwiftLogNoOpLogHandler.init)
+
+
+final class EventLoopTaskExecutor : TaskExecutor, SerialExecutor {
+    let eventLoop: any EventLoop
+
+    init(eventLoop: any EventLoop) {
+        self.eventLoop = eventLoop
+    }
+    
+    func enqueue(_ job: consuming ExecutorJob) {
+        let job = UnownedJob(job)
+        self.eventLoop.execute {
+            job.runSynchronously(isolatedTo:
+                self.eventLoop.executor.asUnownedSerialExecutor(),
+                taskExecutor: self.asUnownedTaskExecutor())
+        }
+    }
+
+    func asUnownedTaskExecutor() -> UnownedTaskExecutor {
+        return UnownedTaskExecutor(ordinary: self)
+    }
+
+    func asUnownedSerialExecutor() -> UnownedSerialExecutor {
+        return UnownedSerialExecutor(ordinary: self)
+    }
+    
+}
