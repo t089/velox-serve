@@ -146,6 +146,10 @@ final class VeloxServeTests {
     @Test
     func testInterceptingHandler() async throws {
         final class Wrapper: RequestReader {
+            var executor: any (SerialExecutor & TaskExecutor) { 
+                wrapped.executor
+            }
+
             let wrapped: RequestReader
             init(wrapped: RequestReader) {
                 self.wrapped = wrapped

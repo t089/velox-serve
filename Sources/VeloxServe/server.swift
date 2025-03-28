@@ -165,8 +165,13 @@ public final class Server: Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
             .serverChannelInitializer({ channel in
-                channel.pipeline.addHandler(
-                    quiescingHelper.makeServerChannelHandler(channel: channel))
+                let promise = channel.eventLoop.makePromise(of: Void.self)
+                promise.completeWith(Result<Void, any Error> {
+                        try channel.pipeline.syncOperations.addHandler(
+                            quiescingHelper.makeServerChannelHandler(channel: channel)
+                        )
+                    })
+                return promise.futureResult
             })
 
             // Set the handlers that are applied to the accepted Channels
