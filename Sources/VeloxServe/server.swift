@@ -182,6 +182,7 @@ public final class Server: Sendable {
             //.childChannelOption(ChannelOptions.maxMessagesPerRead, value: 1)
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelOption(ChannelOptions.autoRead, value: true)
+            .childChannelOption(ChannelOptions.socketOption(.so_sndbuf), value: 16 * 1024)
 
         let channel = try await socketBootstrap.bind(host: configuration.host, port: configuration.port, serverBackPressureStrategy: nil) 
         { channel -> EventLoopFuture<NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>> in 
