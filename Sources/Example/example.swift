@@ -43,20 +43,20 @@ struct Example: AsyncParsableCommand {
         }()
 
         var router = Router()
-        router.get("/", handler: AnyHandler { req, res in
+        router.get("/") { req, res in
             try await res.plainText("Hello, world!\r\n")
-        })
+        }
 
-        router.post("/upload", handler: AnyHandler(self.upload))
+        router.post("/upload", handler: self.upload)
 
-        router.get("/chunked", handler: AnyHandler(self.chunked))
+        router.get("/chunked", handler: self.chunked)
 
-        router.post("/echo", handler: AnyHandler(self.echo))
-        router.get("/echo", handler: AnyHandler(self.echo))
-        router.put("/echo", handler: AnyHandler(self.echo))
-        router.delete("/echo", handler: AnyHandler(self.echo))
+        router.post("/echo", handler: self.echo)
+        router.get("/echo", handler: self.echo)
+        router.put("/echo", handler: self.echo)
+        router.delete("/echo", handler: self.echo)
 
-        router.get("/random", handler: AnyHandler(self.random))
+        router.get("/random", handler: self.random)
 
 
 

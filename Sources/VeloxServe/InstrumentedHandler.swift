@@ -20,10 +20,10 @@ extension RequestReader {
     }
 }
 
-public struct InstrumentedHandler: Handler {
-    public let next: Handler
+public struct InstrumentedHandler: HandlerProtocol {
+    public let next: HandlerProtocol
 
-    init(_ next: Handler) {
+    init(_ next: HandlerProtocol) {
         self.next = next
     }
 
@@ -61,8 +61,8 @@ enum HTTPRequestKey: ServiceContextKey {
 }
 
 
-extension Handler {
-    public func instrumented() -> some Handler {
+extension HandlerProtocol {
+    public func instrumented() -> some HandlerProtocol {
         InstrumentedHandler(self)
     }
 }

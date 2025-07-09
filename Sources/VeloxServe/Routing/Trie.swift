@@ -133,7 +133,15 @@ struct Trie<Value> {
     }
 }
 
-typealias RouteHandler = (any RequestReader, any ResponseWriter) async throws -> Void
+struct RouteHandler: HandlerProtocol {
+    let path: String
+    let handler: Handler
+
+    func handle(_ request: any RequestReader, _ response: any ResponseWriter) async throws {
+        request.route = path
+        try await handler(request, response)
+    }
+}
 
 extension Trie {
     struct Node {
@@ -195,8 +203,8 @@ extension Array where Element == PathComponent {
     }
 }
 
-public struct Router: Handler {
-    private var trie: Trie<Handler> = Trie()
+public struct Router: HandlerProtocol {
+    private var trie: Trie<HandlerProtocol> = Trie()
 
     public init() {}
 
@@ -225,29 +233,91 @@ public struct Router: Handler {
         }
     }
 
-    public mutating func register(method: HTTPRequest.Method, path: String, handler: Handler) {
-        trie.insert(path: .init(path: path), method: method, handler: handler.withRoute(path))
+    public mutating func register(method: HTTPRequest.Method, path: String, handler: HandlerProtocol) {
+        trie.insert(path: .init(path: path), method: method, handler: chain(handler: handler.withRoute(path), middlewares: middlewares))
     }
 
-    public mutating func get(_ path: String, handler: Handler) {
-        trie.insert(path: .init(path: path), method: .get, handler: handler.withRoute(path))
+    public mutating func register(method: HTTPRequest.Method, path: String, handler: @escaping Handler) {
+        self.register(method: method, path: path, handler: AnyHandler(handler))
     }
 
-    public mutating func post(_ path: String, handler: Handler) {
-        trie.insert(path: .init(path: path), method: .post, handler: handler.withRoute(path))
+    public mutating func get(_ path: String, handler: HandlerProtocol) {
+        self.register(method: .get, path: path, handler: handler)
     }
 
-   public mutating func put(_ path: String, handler: Handler) {
-        trie.insert(path: .init(path: path), method: .put, handler: handler.withRoute(path))
+    public mutating func get(_ path: String, handler: @escaping Handler) {
+        self.register(method: .get, path: path, handler: handler)
     }
 
-    public mutating func delete(_ path: String, handler: Handler) {
-        trie.insert(path: .init(path: path), method: .delete, handler: handler.withRoute(path))
+    public mutating func post(_ path: String, handler: HandlerProtocol) {
+        self.register(method: .post, path: path, handler: handler)
+    }
+
+    public mutating func post(_ path: String, handler: @escaping Handler) {
+        self.register(method: .post, path: path, handler: handler)
+    }
+
+   public mutating func put(_ path: String, handler: HandlerProtocol) {
+        self.register(method: .put, path: path, handler: handler)
+    }
+
+    public mutating func put(_ path: String, handler: @escaping Handler) {
+        self.register(method: .put, path: path, handler: handler)
+    }
+
+    public mutating func delete(_ path: String, handler: HandlerProtocol) {
+        self.register(method: .delete, path: path, handler: handler)
+    }
+
+    public mutating func delete(_ path: String, handler: @escaping Handler) {
+        self.register(method: .delete, path: path, handler: handler)
+    }
+
+    public mutating func patch(_ path: String, handler: HandlerProtocol) {
+        self.register(method: .patch, path: path, handler: handler)
+    }
+
+    public mutating func patch(_ path: String, handler: @escaping Handler) {
+        self.register(method: .patch, path: path, handler: handler)
+    }
+
+    public mutating func options(_ path: String, handler: HandlerProtocol) {
+        self.register(method: .options, path: path, handler: handler)
+    }
+
+    public mutating func options(_ path: String, handler: @escaping Handler) {
+        self.register(method: .options, path: path, handler: handler)
+    }
+
+    public var middlewares: [MiddlewareProtocol] = []
+
+    public mutating func use(_ middleware: @escaping Middleware) {
+        middlewares.append(AnyMiddleware(middleware))
+    }
+
+    public mutating func use(_ middleware: MiddlewareProtocol) {
+        middlewares.append(middleware)
     }
 }
 
-extension Handler {
-    func withRoute(_ path: String) -> Handler {
+func chain(handler: @escaping Handler, middlewares: some Collection<Middleware>) -> Handler {
+    if middlewares.isEmpty {
+        return handler
+    }
+
+    return chain(handler: middlewares.first!(handler), middlewares: middlewares.dropFirst())
+}
+
+func chain(handler: HandlerProtocol, middlewares: some Collection<MiddlewareProtocol>) -> HandlerProtocol {
+    if middlewares.isEmpty {
+        return handler
+    }
+
+    return chain(handler: middlewares.first!.apply(on: handler), middlewares: middlewares.dropFirst())
+}
+
+extension HandlerProtocol {
+    func withRoute(_ path: String) -> HandlerProtocol {
         return AnyHandler { req, res in 
             req.route = path
             try await self.handle(req, res)

@@ -52,14 +52,14 @@ public final class Server: Sendable {
         case initialized(Configuration)
         case starting(waiters: [CheckedContinuation<State.Running, Error>])
         case running(Running)
-        case shuttingDown(serverChannel: ServerChannel, quiescingHelper: ServerQuiescingHelper, logger: Logger, handler: Handler)
+        case shuttingDown(serverChannel: ServerChannel, quiescingHelper: ServerQuiescingHelper, logger: Logger, handler: HandlerProtocol)
         case shutdown
 
         struct Running {
             let serverChannel: ServerChannel
             let quiescingHelper: ServerQuiescingHelper
             let logger: Logger
-            let handler: Handler
+            let handler: HandlerProtocol
             let shutdownSignal: (AsyncStream<Void>.Continuation, AsyncStream<Void>)
         }
     }
@@ -72,7 +72,7 @@ public final class Server: Sendable {
         var name: String?
         var group: EventLoopGroup
         var logger: Logger
-        var handler: Handler
+        var handler: HandlerProtocol
     }
 
     public convenience init(
@@ -81,7 +81,7 @@ public final class Server: Sendable {
         name: String? = nil,
         group: EventLoopGroup = NIOSingletons.posixEventLoopGroup,
         logger: Logger = NoopLogger,
-        handler: @escaping AnyHandler.Handler
+        handler: @escaping Handler
     ) {
         self.init(
             host: host,
@@ -99,7 +99,7 @@ public final class Server: Sendable {
         name: String? = nil,
         group: EventLoopGroup = NIOSingletons.posixEventLoopGroup,
         logger: Logger = NoopLogger,
-        handler: Handler
+        handler: HandlerProtocol
     ) {
         self.state = NIOLockedValueBox(.initialized(Configuration(host: host, port: port, name: name, group: group, logger: logger, handler: handler)))
     }
