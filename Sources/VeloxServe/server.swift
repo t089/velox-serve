@@ -363,7 +363,20 @@ public final class Server: Sendable {
                 
                 if !body.wasRead {
                     // if the body was not read, we need to consume it
-                    for try await _ in body {}
+                    loop: while true {
+                        let next = try await inboundIterator.next()
+                        
+                        switch next {
+                            case .body(_): continue
+                            case .end(_):
+                                break loop
+                            case .head(_): 
+                                assertionFailure("body should not contain head")
+                                break loop
+                            case .none:
+                                break loop
+                        }
+                    }
                 } 
 
                 if !responseWriter.isDone {

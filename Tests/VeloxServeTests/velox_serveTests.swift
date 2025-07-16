@@ -8,7 +8,9 @@ import NIOHTTPTypes
 import NIOHTTPTypesHTTP1
 import Testing
 import VeloxServe
+import Synchronization
 
+@Suite("VeloxServe Tests", .timeLimit(.minutes(1)))
 final class VeloxServeTests {
 
     var client: HTTPClient!
@@ -77,18 +79,21 @@ final class VeloxServeTests {
 
         server.shutdown()
         let _ = try await serverTask.value
-        #expect(true)  // Just to ensure no exceptions are thrown
+        #expect(Bool(true))  // Just to ensure no exceptions are thrown
     }
 
     @Test
     func testTrailers() async throws {
         let xTest = HTTPField.Name("x-test")!
         let result = try await withServer { req, res in
-            res.trailers = try await req.trailers
+            
             for try await var buffer in req.body {
                 try await res.writeBodyPart(&buffer)
             }
+            res.trailers = try await req.trailers
+
             try await res.writeBodyPart("EOF\r\n")
+
         } client: { inbound, outbound in
             try await outbound.write(
                 .head(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/")))
@@ -100,7 +105,7 @@ final class VeloxServeTests {
         }
 
         #expect([xTest: "test"] == result.2)
-        #expect("EOF\r\n" == String(decoding: result.1.readableBytesView, as: UTF8.self))
+        #expect("Hello, World\r\nEOF\r\n" == String(decoding: result.1.readableBytesView, as: UTF8.self))
     }
 
     @Test
@@ -187,7 +192,7 @@ final class VeloxServeTests {
                 var expectedContentLength: Int? { wrapped.expectedContentLength }
                 var trailers: HTTPFields? { get async throws { try await wrapped.trailers } }
 
-                var bufferedData: ByteBuffer = ByteBuffer()
+                let bufferedData: Mutex<ByteBuffer> = .init(ByteBuffer())
 
                 func makeAsyncIterator() -> AsyncIterator {
                     AsyncIterator(underlying: wrapped.makeAsyncIterator(), body: self)
@@ -201,12 +206,15 @@ final class VeloxServeTests {
 
                     mutating func next() async throws -> ByteBuffer? {
                         let next = try await underlying.next()
-                        let remainingCapacity = 16 - body.bufferedData.readableBytes
-                        if var next, remainingCapacity > 0 {
-                            var slice = next.readSlice(
-                                length: Swift.min(next.readableBytes, remainingCapacity))!
-                            body.bufferedData.writeBuffer(&slice)
+                        body.bufferedData.withLock { buffer in 
+                            let remainingCapacity = 16 - buffer.readableBytes
+                            if var next, remainingCapacity > 0 {
+                                var slice = next.readSlice(
+                                    length: Swift.min(next.readableBytes, remainingCapacity))!
+                                buffer.writeBuffer(&slice)
+                            }
                         }
+                        
                         return next
                     }
                 }
@@ -229,10 +237,10 @@ final class VeloxServeTests {
         ) async throws {
             let wrapper = Wrapper(wrapped: req)
             try await next(wrapper, res)
-            #expect(16 == wrapper._body.bufferedData.readableBytes)
-            await logger.log("Request body length: \(wrapper._body.bufferedData.readableBytes)")
+            #expect(16 == wrapper._body.bufferedData.withLock { $0.readableBytes })
+            await logger.log("Request body length: \(wrapper._body.bufferedData.withLock { $0.readableBytes })")
             await logger.log(
-                "\(String(decoding: wrapper._body.bufferedData.readableBytesView, as: UTF8.self))")
+                "\(String(decoding: wrapper._body.bufferedData.withLock { $0.readableBytesView }, as: UTF8.self))")
         }
 
         let result = try await withServer { req, res in

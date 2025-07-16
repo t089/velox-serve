@@ -29,7 +29,7 @@ extension RequestReader {
     }
 }
 
-public protocol ReadableBody : AsyncSequence where Element == ByteBuffer {
+public protocol ReadableBody : AsyncSequence, Sendable where Element == ByteBuffer {
     var expectedContentLength: Int? { get }
 
     // accessing trailers is async because it may require reading the entire body
@@ -57,8 +57,8 @@ extension ReadableBody {
 public struct AnyReadableBody: ReadableBody {
     public typealias Element = ByteBuffer
 
-    private let _underlyingNextFactory: () -> () async throws -> ByteBuffer?
-    private let _underlyingTrailers: () async throws -> HTTPFields?
+    private let _underlyingNextFactory: @Sendable () -> () async throws -> ByteBuffer?
+    private let _underlyingTrailers: @Sendable () async throws -> HTTPFields?
 
     public init<Body: ReadableBody>(_ body: Body)
     where Body.Element == ByteBuffer {
@@ -153,80 +153,232 @@ final class RootRequestReader: RequestReader {
     } */
 }
 
+import Synchronization
+
+public struct TooManyIterationsError: Error {
+    public init() {}
+}
+
 final class RootReadableBody: ReadableBody {
     public typealias Element = ByteBuffer
 
     public let expectedContentLength: Int?
 
-    @usableFromInline
-    var _trailers: HTTPFields?
-
     public var trailers: HTTPFields? {
         get async throws { 
-            if !self.wasRead {
-                for try await _ in self {}
+            enum Action {
+                case returnTrailers(HTTPFields?)
+                case waitForHeaders
             }
-            return self._trailers
+
+            let action : Action = self.state.withLock { state in
+                switch state {
+                case .fullyRead(let trailers):
+                    return .returnTrailers(trailers)
+                case .initial, .reading:
+                    return .waitForHeaders
+                }
+            }
+
+            switch action {
+            case .returnTrailers(let trailers):
+                return trailers
+            case .waitForHeaders:
+                // wait for the body to be fully read
+                for try await _ in self { }
+                return self.state.withLock { $0.trailers }
+            }
         }
     }
 
     @usableFromInline
     typealias InboundStream = NIOAsyncChannelInboundStream<HTTPRequestPart>
 
-    @usableFromInline
-    var _internal: InboundStream.AsyncIterator
+    enum State {
+        case initial(fireFirstRead: (() -> ()), iteratorCreated: Bool = false)
+        case reading
+        case fullyRead(trailers: HTTPFields?)
+    
 
-    @usableFromInline
-    var wasRead: Bool = false
+        enum Action {
+            case fireFirstRead(() -> (), chunk: ByteBuffer)
+            case chunkRead(ByteBuffer)
+            case endStream
+        }
 
-    @usableFromInline
-    var fireFirstRead : (() -> ())!
+    
 
-    init(expectedContentLength: Int?, _internal: InboundStream.AsyncIterator, onFirstRead: @escaping () -> ()) {
-        self._internal = _internal
-        self.expectedContentLength = expectedContentLength
-        self.fireFirstRead = onFirstRead
-    }
-
-    public func makeAsyncIterator() -> AsyncIterator {
-        return .init(underlying: self)
-    }
-
-    public struct AsyncIterator: AsyncIteratorProtocol {
-        @usableFromInline
-        var underlying: RootReadableBody
-
-        @inlinable
-        public mutating func next() async throws -> ByteBuffer? {
-            do {
-                guard !self.underlying.wasRead else {
-                    return nil
+        mutating func onMakeIterator() throws(TooManyIterationsError) {
+            switch self {
+            case .initial(let fireFirstRead, let iteratorCreated):
+                guard !iteratorCreated else {
+                    throw TooManyIterationsError()
                 }
+                self = .initial(fireFirstRead: fireFirstRead, iteratorCreated: true)
+            case .reading, .fullyRead:
+                // already created
+                throw TooManyIterationsError()
+            }
+        }
 
-                if let fireFirstRead = self.underlying.fireFirstRead {
-                    fireFirstRead()
-                    self.underlying.fireFirstRead = nil
+        mutating func onNext(_ element: borrowing InboundStream.Element?) -> Action {
+            switch self {
+            case .initial(let fireFirstRead, _):
+                switch element {
+                case .body(let chunk):
+                    self = .reading
+                    return .fireFirstRead(fireFirstRead, chunk: chunk)
+                case .end(let trailers):
+                    self = .fullyRead(trailers: trailers)
+                    return .endStream
+                case .head(_):
+                    // unexpected head part, we are not expecting it
+                    self = .reading
+                    return .endStream
+                case nil:
+                    // no more elements, we are done
+                    self = .fullyRead(trailers: nil)
+                    return .endStream
                 }
-                guard let next = try await underlying._internal.next() else {
-                    self.underlying.wasRead = true
-                    return nil
+                
+                
+            case .reading:
+                switch element {
+                case .body(let chunk):
+                    self = .reading
+                    return .chunkRead(chunk)
+                case .end(let trailers):
+                    self = .fullyRead(trailers: trailers)
+                    return .endStream
+                case .head(_):
+                    // unexpected head part, we are not expecting it
+                    fatalError("Impossible state: received head part while reading body")
+                case nil:
+                    // no more elements, we are done
+                    self = .fullyRead(trailers: nil)
+                    return .endStream
                 }
+            case .fullyRead:
+                return .endStream
+            }
+        }
 
-                switch next {
-                    case .body(let buffer):
-                        return buffer
-                    case .end(let trailers):
-                        self.underlying._trailers = trailers
-                        self.underlying.wasRead = true
-                        return nil
-                    default:
-                        self.underlying.wasRead = true
-                        throw Server.HTTPError.unexpectedHTTPPart(next)
-                }
-            } catch {
-                throw error
+        var trailers: HTTPFields? {
+            switch self {
+            case .initial, .reading:
+                return nil
+            case .fullyRead(let trailers):
+                return trailers
             }
         }
     }
 
+    @usableFromInline
+    let state: Mutex<State>
+
+    @usableFromInline
+    var wasRead: Bool {
+        self.state.withLock { state in
+            switch state {
+            case .initial, .reading:
+                return false
+            case .fullyRead:
+                return true
+            }
+        }
+    }
+
+    @usableFromInline
+    let _internal: UnsafeTransfer<InboundStream.AsyncIterator>
+
+
+    init(expectedContentLength: Int?, _internal: InboundStream.AsyncIterator, onFirstRead: sending @escaping () -> ()) {
+        self._internal = .init(_internal)
+        self.expectedContentLength = expectedContentLength
+        self.state = Mutex(.initial(fireFirstRead: onFirstRead))
+    }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        do {
+            try self.state.withLock { try $0.onMakeIterator() }
+            return AsyncIterator(iterating: BodyIterator(body: self, underlying: self._internal.wrapped))
+        } catch  {
+            return AsyncIterator(throwing: error)
+        }
+    }
+
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        @usableFromInline
+        var produceNext: () async throws -> ByteBuffer?
+
+        init(throwing error: Error) {
+            self.produceNext = { throw error }
+        }
+
+        init(iterating iterator: BodyIterator) {
+            var iterator = iterator
+            self.produceNext = { try await iterator.next() }
+        }
+
+        public func next() async throws -> Element? {
+            try await self.produceNext()
+        }
+    }
+
+    struct ThrowingIterator: AsyncIteratorProtocol {
+        @usableFromInline
+        let error: Error
+
+        init(throwing error: Error) {
+            self.error = error
+        }
+
+        func next() async throws -> Element? {
+            throw self.error
+        }
+    }
+
+    struct BodyIterator: AsyncIteratorProtocol {
+        @usableFromInline
+        let body: RootReadableBody
+
+        @usableFromInline
+        var underlying: RootReadableBody.InboundStream.AsyncIterator
+
+        @usableFromInline
+        var done: Bool = false
+
+        @inlinable
+        public mutating func next() async throws -> ByteBuffer? {
+            guard !done else {
+                return nil
+            }
+
+            let next = try await underlying.next()
+
+            switch self.body.state.withLock({ $0.onNext(next) }) {
+                case .fireFirstRead(let fireFirstRead, let chunk):
+                    fireFirstRead()
+                    return chunk
+                case .chunkRead(let chunk):
+                    return chunk
+                case .endStream:
+                    self.done = true
+                    return nil
+                
+            }
+        }
+    }
+
+}
+
+@usableFromInline
+struct UnsafeTransfer<Wrapped>: @unchecked Sendable {
+    @usableFromInline
+    var wrapped: Wrapped
+
+    @inlinable
+    init(_ wrapped: Wrapped) {
+        self.wrapped = wrapped
+    }
 }
