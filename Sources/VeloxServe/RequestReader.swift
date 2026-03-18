@@ -45,26 +45,37 @@ extension ReadableBody {
             }
         }
 
-        /// calling collect function within here in order to ensure the correct nested type
-        func collect<Body: AsyncSequence>(_ body: Body, maxBytes: Int) async throws -> ByteBuffer
-        where Body.Element == ByteBuffer {
-            try await body.collect(upTo: maxBytes)
+        var buffer = ByteBuffer()
+        for try await chunk in self {
+            var chunk = chunk
+            if buffer.readableBytes + chunk.readableBytes > maxBytes {
+                throw TooManyBytesError()
+            }
+            buffer.writeBuffer(&chunk)
         }
-        return try await collect(self, maxBytes: maxBytes)
+        return buffer
+    }
+}
+
+private final class UnsafeIteratorBox<I: AsyncIteratorProtocol>: @unchecked Sendable {
+    var iterator: I
+    init(_ iterator: I) { self.iterator = iterator }
+    func next(isolation actor: isolated (any Actor)?) async throws -> I.Element? {
+        try await iterator.next(isolation: actor)
     }
 }
 
 public struct AnyReadableBody: ReadableBody {
     public typealias Element = ByteBuffer
 
-    private let _underlyingNextFactory: () -> () async throws -> ByteBuffer?
+    private let _underlyingNextFactory: () -> ((any Actor)?) async throws -> ByteBuffer?
     private let _underlyingTrailers: () async throws -> HTTPFields?
 
     public init<Body: ReadableBody>(_ body: Body)
     where Body.Element == ByteBuffer {
-        self._underlyingNextFactory = { 
-            var iterator = body.makeAsyncIterator()
-            return { try await iterator.next() }
+        self._underlyingNextFactory = {
+            let box = UnsafeIteratorBox(body.makeAsyncIterator())
+            return  { isolation in  try await box.next(isolation: isolation) }
          }
         self._underlyingTrailers = { try await body.trailers }
         self.expectedContentLength = body.expectedContentLength
@@ -85,15 +96,15 @@ public struct AnyReadableBody: ReadableBody {
     
     public struct AsyncIterator: AsyncIteratorProtocol {
         @usableFromInline
-        var _iterator: () async throws -> Element?
+        var _iterator: ((any Actor)?) async throws -> Element?
 
-        init(iterator: @escaping () async throws -> Element?) {
+        init(iterator: @escaping ((any Actor)?) async throws -> Element?) {
             self._iterator = iterator
         }
 
         @inlinable
-        public mutating func next() async throws -> Element? {
-            try await self._iterator()
+        public mutating func next(isolation: (any Actor)?) async throws -> Element? {
+            try await self._iterator(isolation)
         }
     }
 }
@@ -170,7 +181,7 @@ final class RootReadableBody: ReadableBody {
     typealias InboundStream = NIOAsyncChannelInboundStream<HTTPRequestPart>
 
     @usableFromInline
-    var _internal: InboundStream.AsyncIterator
+    nonisolated(unsafe) var _internal: InboundStream.AsyncIterator
 
     @usableFromInline
     var wasRead: Bool = false

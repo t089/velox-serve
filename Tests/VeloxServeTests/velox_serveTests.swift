@@ -210,7 +210,7 @@ final class VeloxServeTests {
         let logger = Logs()
 
         @Sendable
-        func reqBodyLogger(_ req: any RequestReader, _ res: any ResponseWriter, _ next: AnyHandler.Handler) async throws {
+        nonisolated(nonsending) func reqBodyLogger(_ req: any RequestReader, _ res: any ResponseWriter, _ next: AnyHandler.Handler) async throws {
             let wrapper = Wrapper(wrapped: req)
             try await next(wrapper, res)
             #expect(16 == wrapper._body.bufferedData.readableBytes)

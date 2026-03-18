@@ -14,21 +14,21 @@ public protocol ResponseWriter: AnyObject {
 }
 
 extension ResponseWriter {
-    public func writeBodyPart(_ string: String) async throws {
+    nonisolated(nonsending) public func writeBodyPart(_ string: String) async throws {
         try await self.writeBodyPart(string.utf8)
     }
 
-    public func writeBodyPart(_ string: Substring) async throws {
+    nonisolated(nonsending) public func writeBodyPart(_ string: Substring) async throws {
         try await self.writeBodyPart(string.utf8)
     }
 
     @inlinable
-    public func writeBodyPart(_ bytes: some Sequence<UInt8>) async throws {
+    nonisolated(nonsending) public func writeBodyPart(_ bytes: some Sequence<UInt8>) async throws {
         var buffer = ByteBuffer(bytes: bytes)
         try await self.writeBodyPart(&buffer)
     }
 
-    public func plainText(_ text: String) async throws {
+    nonisolated(nonsending) public func plainText(_ text: String) async throws {
         self.headers[.contentType] = "text/plain"
         let data = text.utf8
         self.headers[.contentLength] = "\(data.count)"

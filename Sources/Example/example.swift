@@ -89,7 +89,7 @@ struct Example: AsyncParsableCommand {
         for try await buffer in req.body {
             uploadedBytes += buffer.readableBytes
         }
-        let elapsed = start.distance(to: .now())
+        let elapsed = DispatchTimeInterval.nanoseconds(Int(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds))
         try await res.plainText("You uploaded \(uploadedBytes) bytes (\(Double(uploadedBytes)/elapsed.seconds/1024.0/1024.0) MB/s)")
     }
 
@@ -187,11 +187,11 @@ let randomStaticBuffer : UnsafeSendableBox<UnsafeMutableBufferPointer<UInt8>> = 
         let start = DispatchTime.now()
         do {
             try await serve(req, res)
-            let duration = start.distance(to: .now())
+            let duration = DispatchTimeInterval.nanoseconds(Int(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds))
             logger.info(
                 "\(req.method) \(req.path) - \(res.status.code) - \(duration.millis.formatted(3))ms")
         } catch {
-            let duration = start.distance(to: .now())
+            let duration = DispatchTimeInterval.nanoseconds(Int(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds))
             logger.error("\(req.method) \(req.path) - ERROR - \(duration): \(error)")
             throw error
         }

@@ -1,7 +1,18 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
+
+let swiftSettings: [SwiftSetting] = [
+    .enableUpcomingFeature("LifetimeDependence"),
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableExperimentalFeature("SuppressedAssociatedTypes"),
+    .enableExperimentalFeature("LifetimeDependence"),
+    .enableExperimentalFeature("Lifetimes"),
+    .enableExperimentalFeature("NoncopyableGenerics"),
+    .swiftLanguageMode(.v6)
+]
 
 let package = Package(
     name: "velox-serve",
@@ -38,9 +49,7 @@ let package = Package(
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 "VeloxServe"
             ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6)
-            ]
+            swiftSettings: swiftSettings
         ),
         .target(
             name: "VeloxServe",
@@ -56,9 +65,7 @@ let package = Package(
                 .product(name: "Instrumentation", package: "swift-distributed-tracing"),
                 .product(name: "Tracing", package: "swift-distributed-tracing"),
             ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6)
-            ]),
+            swiftSettings: swiftSettings),
         .testTarget(
             name: "VeloxServeTests",
             dependencies: [
