@@ -54,11 +54,25 @@ extension RequestReader {
 public struct InstrumentedHandler: HandlerProtocol {
     public let next: HandlerProtocol
 
-    init(_ next: HandlerProtocol) {
+    /// Predicate deciding whether a request should be traced. It is given only
+    /// the request head (`HTTPRequest`), which is all that is known before the
+    /// handler runs, so callers can skip high-volume, low-value endpoints such
+    /// as health probes and the metrics scrape.
+    let shouldInstrument: @Sendable (HTTPRequest) -> Bool
+
+    init(
+        _ next: HandlerProtocol,
+        shouldInstrument: @escaping @Sendable (HTTPRequest) -> Bool = { _ in true }
+    ) {
         self.next = next
+        self.shouldInstrument = shouldInstrument
     }
 
     public func handle(_ request: RequestReader, _ res: any ResponseWriter) async throws {
+        guard shouldInstrument(request.request) else {
+            return try await next.handle(request, res)
+        }
+
         var context = ServiceContext.topLevel
 
         InstrumentationSystem.instrument.extract(request.headers, into: &context, using: HTTPHeaderFieldsExtractor())
@@ -178,7 +192,14 @@ enum HTTPRequestKey: ServiceContextKey {
 
 
 extension HandlerProtocol {
-    public func instrumented() -> some HandlerProtocol {
-        InstrumentedHandler(self)
+    /// Wraps the handler so each request is traced as an OTel server span.
+    ///
+    /// - Parameter shouldInstrument: Given the request head, returns whether the
+    ///   request should be traced. Defaults to tracing everything. Use it to skip
+    ///   noisy endpoints, e.g. `{ $0.path?.hasPrefix("/health") == false }`.
+    public func instrumented(
+        shouldInstrument: @escaping @Sendable (HTTPRequest) -> Bool = { _ in true }
+    ) -> some HandlerProtocol {
+        InstrumentedHandler(self, shouldInstrument: shouldInstrument)
     }
 }
