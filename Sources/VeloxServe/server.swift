@@ -351,8 +351,9 @@ public final class Server: Sendable {
                         executor: executor)
                 
                 requestReader.userInfo[EventLoopKey.self] = channel.channel.eventLoop
+                requestReader.userInfo[ClientAddressKey.self] = channel.channel.remoteAddress
 
-                
+
                 let responseWriter = RootResponseWriter(
                         allocator: channel.channel.allocator,
                         isKeepAlive: head.isKeepAlive,
